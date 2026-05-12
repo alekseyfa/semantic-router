@@ -20,6 +20,7 @@ test-openvino-binding: build-openvino-binding convert-openvino-test-models ## Ru
 	@echo "Running OpenVINO binding Go unit tests..."
 	@echo "================================================================"
 	@export LD_LIBRARY_PATH=$${PWD}/openvino-binding/build:$$LD_LIBRARY_PATH && \
+	export OPENVINO_TOKENIZERS_LIB=$$(find $${PWD}/.venv -name "libopenvino_tokenizers.so" 2>/dev/null | head -1) && \
 		cd openvino-binding && CGO_ENABLED=1 go test -v -timeout 10m
 	@echo "================================================================"
 	@echo "✅ OpenVINO binding tests passed"
@@ -41,6 +42,7 @@ test-openvino-specific: build-openvino-binding convert-openvino-test-models ## R
 	fi
 	@echo "Running OpenVINO test: $(TEST_NAME)"
 	@export LD_LIBRARY_PATH=$${PWD}/openvino-binding/build:$$LD_LIBRARY_PATH && \
+	export OPENVINO_TOKENIZERS_LIB=$$(find $${PWD}/.venv -name "libopenvino_tokenizers.so" 2>/dev/null | head -1) && \
 		cd openvino-binding && CGO_ENABLED=1 go test -v -timeout 10m -run "^$(TEST_NAME)$$"
 
 # Verify OpenVINO binding with real model inference

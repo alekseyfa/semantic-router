@@ -19,8 +19,6 @@ except ImportError:
 try:
     from transformers import (
         AutoTokenizer,
-        AutoModelForSequenceClassification,
-        AutoModelForTokenClassification,
         AutoConfig,
     )
     import torch
@@ -30,6 +28,14 @@ except ImportError:
     print(
         "✗ Transformers/PyTorch not installed. Install with: pip install transformers torch"
     )
+    sys.exit(1)
+
+try:
+    from optimum.intel import OVModelForSequenceClassification, OVModelForTokenClassification
+
+    print("✓ optimum-intel imported")
+except ImportError:
+    print("✗ optimum-intel not installed. Install with: pip install optimum[openvino]")
     sys.exit(1)
 
 # Model paths in the semantic-router models directory
@@ -102,57 +108,42 @@ def convert_model(model_info):
         num_labels = getattr(config, "num_labels", 2)
         print(f"  Model config: num_labels={num_labels}")
 
-        # Load model based on type
+        # Use optimum-intel OVModel* classes — proper HuggingFace → OpenVINO export
+        print("  Converting to OpenVINO IR format via optimum-intel...")
         if model_type == "sequence_classification":
-            model = AutoModelForSequenceClassification.from_pretrained(model_path)
+            ov_model = OVModelForSequenceClassification.from_pretrained(
+                model_path, export=True
+            )
         elif model_type == "token_classification":
-            model = AutoModelForTokenClassification.from_pretrained(model_path)
+            ov_model = OVModelForTokenClassification.from_pretrained(
+                model_path, export=True
+            )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
-        model.eval()
-        print(f"✓ Model loaded from {model_path}")
+        print(f"✓ Model converted from {model_path}")
 
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        print(f"✓ Tokenizer loaded")
-
-        # Create dummy input for export
-        dummy_text = "This is a sample text for model export"
-        inputs = tokenizer(
-            dummy_text,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=128,
-        )
-
-        # Export to OpenVINO
-        print("  Converting to OpenVINO IR format...")
-        with torch.no_grad():
-            ov_model = ov.convert_model(
-                model,
-                example_input={
-                    "input_ids": inputs["input_ids"],
-                    "attention_mask": inputs["attention_mask"],
-                },
-            )
-
-        # Save OpenVINO model
-        ov.save_model(ov_model, str(output_dir / "openvino_model.xml"))
+        # Save in OpenVINO IR format
+        ov_model.save_pretrained(output_dir)
         print(f"✓ OpenVINO model saved")
 
         # Save tokenizer and config
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.save_pretrained(output_dir)
-        config.save_pretrained(output_dir)
+        print(f"✓ Tokenizer saved")
 
-        # Copy vocab.txt if exists
-        vocab_file = model_path / "vocab.txt"
-        if vocab_file.exists():
-            shutil.copy(vocab_file, output_dir / "vocab.txt")
-            print(f"✓ Vocabulary file copied")
-
-        print(f"\n✓ Successfully converted: {description}")
+        # Test inference
+        print(f"\n  Testing inference...")
+        test_result = ov_model(
+            **tokenizer(
+                "Test inference",
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=128,
+            )
+        )
+        print(f"  ✓ Inference test passed: logits shape = {test_result.logits.shape}")
 
         # List output files
         print(f"  Output files:")
@@ -160,29 +151,7 @@ def convert_model(model_info):
             size_kb = f.stat().st_size / 1024
             print(f"    - {f.name} ({size_kb:.0f} KB)")
 
-        # Test inference
-        print(f"\n  Testing inference...")
-        core = ov.Core()
-        compiled_model = core.compile_model(ov_model, "CPU")
-
-        test_inputs = tokenizer(
-            "Test inference",
-            return_tensors="np",
-            padding=True,
-            truncation=True,
-            max_length=128,
-        )
-        infer_request = compiled_model.create_infer_request()
-        infer_request.infer(
-            {
-                "input_ids": test_inputs["input_ids"],
-                "attention_mask": test_inputs["attention_mask"],
-            }
-        )
-
-        output = infer_request.get_output_tensor()
-        print(f"  ✓ Inference test passed: output shape = {output.shape}")
-
+        print(f"\n✓ Successfully converted: {description}")
         return True
 
     except Exception as e:

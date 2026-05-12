@@ -109,7 +109,7 @@ core::ClassificationResult TextClassifier::classify(const std::string& text) {
         
         // Set tensors and run inference
         slot->request.set_tensor("input_ids", input_ids_tensor);
-        slot->request.set_tensor("101", attention_mask_tensor);  // Model uses "101" for attention_mask
+        slot->request.set_tensor("attention_mask", attention_mask_tensor);
         slot->request.infer();
         
         // Get output tensor by name (logits: [batch_size, num_classes])
@@ -182,7 +182,7 @@ core::ClassificationResultWithProbs TextClassifier::classifyWithProbabilities(co
         
         // Set tensors and run inference
         slot->request.set_tensor("input_ids", input_ids_tensor);
-        slot->request.set_tensor("101", attention_mask_tensor);
+        slot->request.set_tensor("attention_mask", attention_mask_tensor);
         slot->request.infer();
         
         // Get output tensor
