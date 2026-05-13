@@ -122,8 +122,10 @@ results/
 reports/
 
 # AI tooling regulation docs
-# Ignore Copilot/Claude/Cursor rule docs anywhere in the repo
+# Ignore Copilot/Claude/Cursor rule docs anywhere in the repo EXCEPT top-level CLAUDE.md
+# (CLAUDE.md at repo root is intentionally committed — it transfers project context to agents)
 **/[Cc]laude*.md
+!CLAUDE.md
 **/[Cc]ursor*.md
 .github/[Cc]laude*.md
 .github/[Cc]ursor*.md
@@ -134,9 +136,6 @@ reports/
 
 # augment editor rules
 .augment
-
-# Claude Code configuration (should not be committed)
-CLAUDE.md
 
 # Dashboard frontend (React + TypeScript + Vite)
 dashboard/frontend/node_modules/
