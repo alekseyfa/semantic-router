@@ -51,7 +51,21 @@ npm --version       # 10.9.7
 python3 --version   # 3.12.x
 ```
 
-You also need a **HuggingFace token** (`HF_TOKEN`) for first-run model downloads.
+You also need a **HuggingFace token** set in your environment for first-run model downloads:
+
+```bash
+export HF_TOKEN=your_token_here   # https://huggingface.co/settings/tokens
+```
+
+If you're behind a corporate proxy, export the standard variables before running any commands:
+
+```bash
+export https_proxy=http://your-proxy:port
+export http_proxy=http://your-proxy:port
+export no_proxy=localhost,127.0.0.1
+```
+
+All scripts and Docker commands in this guide inherit these from the environment — nothing is hardcoded.
 
 ---
 
@@ -117,7 +131,7 @@ providers:
 ```bash
 cd /home/gta/semantic-router
 source .venv/bin/activate
-HF_TOKEN=hf_your_token_here vllm-sr serve --config config.yaml
+HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
 ```
 
 This will:
@@ -142,24 +156,14 @@ Envoy is not in the Docker image — it runs locally via `func-e`.
 ```bash
 cd /home/gta/semantic-router
 curl -sSL https://func-e.io/install.sh | bash -s -- -b bin/ v1.3.0
-# Download Envoy 1.35.4 (needs proxy in corporate networks):
-https_proxy=http://proxy-dmz.intel.com:912 bin/func-e use 1.35.4
+# Download Envoy 1.35.4 (proxy is inherited from environment if set):
+bin/func-e use 1.35.4
 ```
 
 **Start Envoy:**
 ```bash
-cat > /tmp/start-envoy.sh << 'EOF'
-#!/bin/bash
-export https_proxy=http://proxy-dmz.intel.com:912
-export http_proxy=http://proxy-dmz.intel.com:912
-exec /home/gta/semantic-router/bin/func-e run \
-  --config-path /home/gta/semantic-router/config/envoy.yaml \
-  --component-log-level "ext_proc:info,router:info,http:warn" \
-  >> /tmp/envoy.log 2>&1
-EOF
-chmod +x /tmp/start-envoy.sh
 > /tmp/envoy.log
-nohup /tmp/start-envoy.sh &
+nohup /home/gta/semantic-router/scripts/start-envoy.sh &
 disown $!
 ```
 
@@ -184,22 +188,8 @@ go build -o dashboard-server .
 
 **Start:**
 ```bash
-cat > /tmp/start-dashboard.sh << 'EOF'
-#!/bin/bash
-export TARGET_ROUTER_API_URL=http://localhost:8080
-export TARGET_ROUTER_METRICS_URL=http://localhost:9190/metrics
-export TARGET_ENVOY_URL=http://localhost:8801
-export TARGET_GRAFANA_URL=http://localhost:3000
-export TARGET_PROMETHEUS_URL=http://localhost:9090
-export TARGET_JAEGER_URL=http://localhost:16686
-export ROUTER_CONFIG_PATH=/home/gta/semantic-router/config.yaml
-export DASHBOARD_PORT=8702
-cd /home/gta/semantic-router/dashboard/backend
-exec ./dashboard-server --static ../frontend/dist
-EOF
-chmod +x /tmp/start-dashboard.sh
 > /tmp/dashboard.log
-nohup /tmp/start-dashboard.sh >> /tmp/dashboard.log 2>&1 &
+nohup /home/gta/semantic-router/scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 &
 disown $!
 ```
 
@@ -220,13 +210,16 @@ cd /home/gta/semantic-router
 source .venv/bin/activate
 
 # 1. Router + observability (Ctrl-C after "vLLM Semantic Router is running!")
-HF_TOKEN=hf_your_token_here vllm-sr serve --config config.yaml
+HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
 
-# 2. Envoy
-> /tmp/envoy.log && nohup /tmp/start-envoy.sh & disown $!
+# 2. vLLM on Arc B570 (if not already running)
+docker start vllm-xpu   # starts existing container; see vLLM section below if missing
 
-# 3. Dashboard
-> /tmp/dashboard.log && nohup /tmp/start-dashboard.sh >> /tmp/dashboard.log 2>&1 & disown $!
+# 3. Envoy
+> /tmp/envoy.log && nohup /home/gta/semantic-router/scripts/start-envoy.sh & disown $!
+
+# 4. Dashboard
+> /tmp/dashboard.log && nohup /home/gta/semantic-router/scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 & disown $!
 ```
 
 ---
@@ -268,11 +261,148 @@ Expected dashboard status (all green):
 
 ---
 
+## Connecting a vLLM Endpoint (Intel Arc B570 dGPU)
+
+### Model: `Qwen/Qwen2.5-3B-Instruct`
+
+**Why this model:**
+- **3B params × 2 bytes (BF16) = ~6 GB** — fits in 9.4 GB VRAM with 3 GB left for KV cache
+- Strong Q&A quality in the 3B class, OpenAI-compatible chat format
+- Well-tested with vLLM, fast on Intel XPU
+
+**Hardware:** Intel Arc B570 (`renderD128`, 9.4 GB VRAM, driver 1.14.36300)
+
+### Start vLLM on Arc B570
+
+```bash
+# One-time: start and keep as a persistent named container
+RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+VIDEO_GID=$(stat -c '%g' /dev/dri/card1)
+
+docker run -d \
+  --name vllm-xpu \
+  --restart unless-stopped \
+  --device /dev/dri/renderD128 \
+  --device /dev/dri/card1 \
+  --group-add $RENDER_GID \
+  --group-add $VIDEO_GID \
+  -p 11434:8000 \
+  -v /home/gta/.cache/huggingface:/root/.cache/huggingface \
+  -e HF_TOKEN="${HF_TOKEN}" \
+  -e https_proxy="${https_proxy}" \
+  -e http_proxy="${http_proxy}" \
+  -e no_proxy="${no_proxy:-localhost,127.0.0.1}" \
+  -e ZE_AFFINITY_MASK=0 \
+  intel/vllm:0.17.0-xpu \
+  python3 -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-3B-Instruct \
+    --dtype bfloat16 \
+    --port 8000 \
+    --host 0.0.0.0 \
+    --max-model-len 8192 \
+    --gpu-memory-utilization 0.85
+```
+
+First run downloads the model (~6 GB). Wait ~2 minutes for startup:
+
+```bash
+# Poll until ready
+until curl -sf http://localhost:11434/health > /dev/null 2>&1; do
+  echo "Waiting for vLLM..."; sleep 15
+done && echo "vLLM ready"
+
+# After reboot: just restart the existing container (no re-download)
+docker start vllm-xpu
+```
+
+**Verify GPU inference directly:**
+```bash
+curl -s http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen2.5-3B-Instruct",
+       "messages":[{"role":"user","content":"What is 2+2?"}],
+       "max_tokens":20}' | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d['choices'][0]['message']['content'])"
+```
+
+### Connect to Semantic Router
+
+The `config.yaml` at the repo root is already configured. The Envoy `config/envoy.yaml` uses
+a **static cluster** pointing to `localhost:11434`.
+
+**Port flow:**
+```
+[Playground / curl] → :8801 (Envoy) → ExtProc :50051 (Router) → :11434 (vLLM on Arc B570)
+```
+
+**Test end-to-end through the full pipeline:**
+```bash
+curl -s http://localhost:8801/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-3B-Instruct",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "max_tokens": 30
+  }' | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])"
+# → Paris
+```
+
+**Or use the Dashboard Playground at http://localhost:8702** — set model to
+`Qwen/Qwen2.5-3B-Instruct` and send any message.
+
+### Switching to a different model or endpoint
+
+Edit `config.yaml`:
+```yaml
+providers:
+  models:
+    - name: "your-model-name"         # must match the HF model ID served by vLLM
+      backend_refs:
+        - name: "primary"
+          weight: 100
+          endpoint: "localhost:11434"  # host:port only — no scheme, no /v1 path
+```
+
+Edit `config/envoy.yaml` static cluster if the port changes:
+```yaml
+  - name: vllm_dynamic_cluster
+    ...
+    load_assignment:
+      cluster_name: vllm_dynamic_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 11434   # ← change port here
+```
+
+Then restart the semantic router and Envoy:
+```bash
+source .venv/bin/activate
+HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
+pkill -9 -f 'func-e|envoy'
+> /tmp/envoy.log && nohup /home/gta/semantic-router/scripts/start-envoy.sh & disown $!
+```
+
+### Notes on the Envoy cluster design
+
+The `vllm_dynamic_cluster` in `config/envoy.yaml` is configured as `STATIC` (pointing to
+`127.0.0.1:11434`) for local development. The original `ORIGINAL_DST` design (which reads
+the `x-vsr-destination-endpoint` header set by the router's ExtProc) **does not work as a
+terminating HTTP proxy** in Envoy 1.35 — ORIGINAL_DST with `use_http_header` only works in
+transparent proxy mode. For local dev, a STATIC cluster is simpler and reliable.
+
+---
+
 ## Stopping Everything
 
 ```bash
 source .venv/bin/activate
 vllm-sr stop                          # stops router + observability containers
+docker stop vllm-xpu                  # stops vLLM (keeps container for fast restart)
 pkill -9 -f 'func-e\|envoy'          # stops Envoy
 pkill -f dashboard-server             # stops dashboard
 ```
@@ -311,39 +441,12 @@ a fatal error in the `:latest` container.
 
 ---
 
-## Troubleshooting
+## How to connect vllm entry point
 
-| Problem | Fix |
-|---------|-----|
-| `deprecated config fields` fatal | Use `routing.modelCards` + `providers.models[].backend_refs` (see Step 2) |
-| Router container crashes after startup | Missing proxy env vars — fixed in `src/vllm-sr/cli/commands/runtime_support.py` via `PASSTHROUGH_ENV_RULES` |
-| Playground returns 403 | Authorino (port 50052) not running — fixed by `failure_mode_allow: true` in `config/envoy.yaml` ext_authz filter |
-| Playground returns 502 | Envoy not started or wrong admin port checked — ensure `nohup /tmp/start-envoy.sh` is running |
-| Playground returns 503 "no healthy upstream", `selected_model: null` | Missing `routing.decisions` block in `config.yaml` — router starts but never sets the upstream. Add the `decisions` block from Step 2 |
-| Playground returns 503 "no healthy upstream", `selected_model: "default-model"` | Routing is correct but LLM backend at your configured endpoint isn't running — start Ollama or your vLLM server |
-| Envoy `LIVE` but dashboard shows unknown | Dashboard rebuild needed after code changes; restart with `/tmp/start-dashboard.sh` |
-| func-e download fails | Needs proxy: `https_proxy=http://proxy-dmz.intel.com:912 bin/func-e use 1.35.4` |
-| Port 8700 bound but connection reset | Normal — `vllm-sr-container` reserves 8700 but nothing serves there. Use 8702 |
-| Dashboard exits immediately | Use `nohup ... & disown $!` pattern (plain `&` gets killed by the shell in this env) |
-| Router exits immediately | `docker logs vllm-sr-container` — usually proxy or HF_TOKEN issue |
-| Models not downloading | Ensure `HF_TOKEN` is valid; proxy vars now pass automatically to container |
-
----
-
-## Code Changes Made to the Repo
-
-The following files were modified to make local dev work correctly:
-
-| File | Change |
-|------|--------|
-| `src/vllm-sr/cli/commands/runtime_support.py` | Added `http_proxy`, `https_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`, `no_proxy`, `NO_PROXY` to `PASSTHROUGH_ENV_RULES` so corporate proxy is forwarded into the Docker container |
-| `config/envoy.yaml` | Changed ext_authz `failure_mode_allow: false` → `true` so requests aren't blocked when Authorino (port 50052) isn't running |
-| `dashboard/backend/handlers/status.go` | Added Envoy HTTP health check fallback (admin port 19000) and hard-coded Dashboard=running when the handler is serving the response |
-| `dashboard/backend/router/router.go` | Pass `cfg.EnvoyURL` to `StatusHandler` |
-| `config.yaml` (repo root) | Added `routing.decisions` catch-all block — without it the router loads but never sets `x-vsr-destination-endpoint`, causing 503 on every request |
-| `openvino-binding/CMakeLists.txt` | Fixed tokenizer discovery to run unconditionally (not only in the find_package fallback path) |
-
----
+```bash
+docker pull intel/vllm:0.17.0-xpu
+docker run -d --privileged --net=host -p 8082:8082 intel/vllm:0.17.0-xpu --model
+```
 
 ## Environment Variables
 
