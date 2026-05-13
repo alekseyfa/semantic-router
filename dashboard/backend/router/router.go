@@ -228,7 +228,7 @@ func Setup(cfg *config.Config) *http.ServeMux {
 	log.Printf("Fetch Raw API endpoint registered: /api/tools/fetch-raw")
 
 	// Status endpoint - shows service health status (aligns with vllm-sr status)
-	mux.HandleFunc("/api/status", handlers.StatusHandler(cfg.RouterAPIURL, cfg.ConfigDir))
+	mux.HandleFunc("/api/status", handlers.StatusHandler(cfg.RouterAPIURL, cfg.ConfigDir, cfg.EnvoyURL))
 	log.Printf("Status API endpoint registered: /api/status")
 
 	// Logs endpoint - shows service logs (aligns with vllm-sr logs)

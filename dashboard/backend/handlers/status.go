@@ -51,7 +51,7 @@ const vllmSrContainerName = "vllm-sr-container"
 
 // StatusHandler returns the status of vLLM-SR services
 // Aligns with the vllm-sr Python CLI by using the same Docker-based detection
-func StatusHandler(routerAPIURL, configDir string) http.HandlerFunc {
+func StatusHandler(routerAPIURL, configDir, envoyURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -141,6 +141,23 @@ func StatusHandler(routerAPIURL, configDir string) http.HandlerFunc {
 				routerMsg = status.RouterRuntime.Message
 			}
 
+			// Fallback: Envoy runs outside the container in the lean-image setup.
+			// When log-based detection misses it, check the Envoy admin port directly.
+			// The admin port is always 19000 when started via the repo envoy.yaml.
+			if !envoyHealthy {
+				envoyRunning, envoyHTTPHealthy, envoyHTTPMsg := checkEnvoyHealth("http://localhost:19000/ready")
+				if envoyRunning {
+					envoyHealthy = envoyHTTPHealthy
+					envoyMsg = envoyHTTPMsg
+				}
+			}
+
+			// Dashboard is always healthy when it is serving this response.
+			if !dashboardHealthy {
+				dashboardHealthy = true
+				dashboardMsg = "Running"
+			}
+
 			status.Services = append(status.Services, ServiceStatus{
 				Name:      "Router",
 				Status:    boolToStatus(routerHealthy),
@@ -154,7 +171,7 @@ func StatusHandler(routerAPIURL, configDir string) http.HandlerFunc {
 				Status:    boolToStatus(envoyHealthy),
 				Healthy:   envoyHealthy,
 				Message:   envoyMsg,
-				Component: "container",
+				Component: "local",
 			})
 
 			status.Services = append(status.Services, ServiceStatus{
@@ -162,7 +179,7 @@ func StatusHandler(routerAPIURL, configDir string) http.HandlerFunc {
 				Status:    boolToStatus(dashboardHealthy),
 				Healthy:   dashboardHealthy,
 				Message:   dashboardMsg,
-				Component: "container",
+				Component: "local",
 			})
 
 			// Update overall status based on services

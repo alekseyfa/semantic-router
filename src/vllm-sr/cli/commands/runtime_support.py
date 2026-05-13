@@ -29,6 +29,13 @@ PASSTHROUGH_ENV_RULES = (
     ("ANTHROPIC_API_KEY", True),
     ("OPENAI_API_KEY", True),
     ("OPENCLAW_BASE_IMAGE", False),
+    # Proxy settings — needed in corporate/proxied environments
+    ("http_proxy", False),
+    ("https_proxy", False),
+    ("HTTP_PROXY", False),
+    ("HTTPS_PROXY", False),
+    ("no_proxy", False),
+    ("NO_PROXY", False),
 )
 
 ALGORITHM_TYPES = [

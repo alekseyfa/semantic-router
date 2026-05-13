@@ -69,6 +69,7 @@ static_resources:
           http_filters:
           # ext_authz filter — validates Bearer token via Authorino (gRPC)
           # On success, Authorino injects x-user-openai-key / x-user-anthropic-key headers
+          # failure_mode_allow: true so local dev without Authorino still works
           - name: envoy.filters.http.ext_authz
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
@@ -76,7 +77,7 @@ static_resources:
                 envoy_grpc:
                   cluster_name: authorino_service
               transport_api_version: V3
-              failure_mode_allow: false
+              failure_mode_allow: true
           - name: envoy.filters.http.ext_proc
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor

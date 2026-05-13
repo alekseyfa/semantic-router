@@ -61,9 +61,14 @@ endif()
 
 message(STATUS "OpenVINO found and configured successfully")
 
+# Find Python3 unconditionally (may already be found from fallback path above)
+if(NOT Python3_FOUND)
+    find_package(Python3 COMPONENTS Interpreter)
+endif()
+
 # Find OpenVINO Tokenizers library
 set(OPENVINO_TOKENIZERS_LIB_DIR "")
-if(Python3_FOUND AND OPENVINO_PYTHON_PATH)
+if(Python3_FOUND)
     # Check if openvino_tokenizers exists in same Python installation
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" -c "import openvino_tokenizers; print(openvino_tokenizers.__path__[0])"
