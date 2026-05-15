@@ -277,13 +277,14 @@ Expected dashboard status (all green):
 ```bash
 # One-time: start and keep as a persistent named container
 RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-VIDEO_GID=$(stat -c '%g' /dev/dri/card1)
+VIDEO_GID=$(stat -c '%g' /dev/dri/card0)
 
 docker run -d \
   --name vllm-xpu \
   --restart unless-stopped \
+  --init \
   --device /dev/dri/renderD128 \
-  --device /dev/dri/card1 \
+  --device /dev/dri/card0 \
   --group-add $RENDER_GID \
   --group-add $VIDEO_GID \
   -p 11434:8000 \
@@ -300,8 +301,17 @@ docker run -d \
     --port 8000 \
     --host 0.0.0.0 \
     --max-model-len 8192 \
-    --gpu-memory-utilization 0.85
+    --gpu-memory-utilization 0.60 \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
 ```
+
+> **Important flags explained:**
+> - `--init` — prevents zombie processes if vLLM crashes (driver abort leaves unkillable container without this)
+> - `--gpu-memory-utilization 0.60` — avoids KV cache over-allocation that triggers a DRM abort in the NEO driver (0.85 tried to allocate 12.9 GiB KV cache on a 9.4 GB card)
+> - `--enforce-eager` — skips torch.compile which emits `sycl_arch not recognized` warnings on Battlemage
+> - `--enable-auto-tool-choice --tool-call-parser hermes` — required for the Dashboard Playground which sends `tool_choice: "auto"` in requests
 
 First run downloads the model (~6 GB). Wait ~2 minutes for startup:
 

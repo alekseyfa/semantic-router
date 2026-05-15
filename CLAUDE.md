@@ -123,11 +123,11 @@ Key flags and env vars for this image version:
 
 ```bash
 RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-VIDEO_GID=$(stat -c '%g' /dev/dri/card1)   # card node for the dGPU
+VIDEO_GID=$(stat -c '%g' /dev/dri/card0)   # card node for the dGPU (card0 on kernel 6.17+ single dGPU)
 
-docker run -d --name vllm-xpu --restart unless-stopped \
+docker run -d --name vllm-xpu --restart unless-stopped --init \
   --device /dev/dri/renderD128 \
-  --device /dev/dri/card1 \
+  --device /dev/dri/card0 \
   --group-add "$RENDER_GID" \
   --group-add "$VIDEO_GID" \
   -p 11434:8000 \
@@ -143,16 +143,24 @@ docker run -d --name vllm-xpu --restart unless-stopped \
     --dtype bfloat16 \
     --port 8000 --host 0.0.0.0 \
     --max-model-len 8192 \
-    --gpu-memory-utilization 0.85
+    --gpu-memory-utilization 0.60 \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
 ```
 
 **Known quirks for `intel/vllm:0.17.0-xpu`:**
 - `--device xpu` CLI flag does **not exist** in this version — XPU is auto-detected
 - `ZE_AFFINITY_MASK=0` selects the first Level Zero device (the dGPU)
+- `--init` is required — without it a DRM abort leaves a zombie container that cannot be killed
+- `--gpu-memory-utilization 0.60` — 0.85 causes a DRM abort during KV cache allocation (12.9 GiB request exceeds 9.4 GB VRAM)
+- `--enforce-eager` — skips torch.compile which emits `sycl_arch not recognized` on Battlemage
+- `--enable-auto-tool-choice --tool-call-parser hermes` — needed for Dashboard Playground (`tool_choice: "auto"`)
 - First startup takes ~2 min: model download + XPU JIT compile cache build
-- Subsequent `docker start vllm-xpu` takes ~90 s (cache is reused)
+- Subsequent `docker start vllm-xpu` takes ~60 s (cache is reused, no torch.compile)
 - `--device` Docker flag alone is insufficient — `--group-add` for both `render` and
   `video` GIDs is required or `torch.xpu.is_available()` returns `False`
+- If vLLM crashes with a DRM abort, the GPU enters a bad state — reboot is required to recover
 
 **Model fit guide for 9–10 GB VRAM at BF16 (2 bytes/param):**
 
