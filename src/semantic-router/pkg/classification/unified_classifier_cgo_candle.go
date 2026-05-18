@@ -1,4 +1,4 @@
-//go:build !onnx && !windows && cgo
+//go:build !onnx && !openvino && !windows && cgo
 
 package classification
 

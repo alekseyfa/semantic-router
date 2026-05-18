@@ -62,10 +62,6 @@ func (c *MmBERT32KCategoryInitializerImpl) Init(modelID string, useCPU bool, num
 	return nil
 }
 
-// createCategoryInitializer creates the category initializer (auto-detecting)
-func createCategoryInitializer() CategoryInitializer {
-	return &CategoryInitializerImpl{}
-}
 
 // createMmBERT32KCategoryInitializer creates an mmBERT-32K category initializer
 func createMmBERT32KCategoryInitializer() CategoryInitializer {
@@ -95,10 +91,6 @@ func (c *CategoryInferenceImpl) ClassifyWithProbabilities(text string) (candle_b
 	return candle_binding.ClassifyModernBertTextWithProbabilities(text)
 }
 
-// createCategoryInference creates the category inference (auto-detecting)
-func createCategoryInference() CategoryInference {
-	return &CategoryInferenceImpl{}
-}
 
 // MmBERT32KCategoryInferenceImpl uses mmBERT-32K for intent classification
 type MmBERT32KCategoryInferenceImpl struct{}
@@ -155,10 +147,6 @@ func (c *JailbreakInitializerImpl) Init(modelID string, useCPU bool, numClasses 
 	return nil
 }
 
-// createJailbreakInitializer creates the jailbreak initializer (auto-detecting)
-func createJailbreakInitializer() JailbreakInitializer {
-	return &JailbreakInitializerImpl{}
-}
 
 // MmBERT32KJailbreakInitializerImpl uses mmBERT-32K (YaRN RoPE, 32K context) for jailbreak detection
 type MmBERT32KJailbreakInitializerImpl struct {
@@ -280,10 +268,6 @@ func (c *PIIInitializerImpl) Init(modelID string, useCPU bool, numClasses int) e
 	return nil
 }
 
-// createPIIInitializer creates the PII initializer (auto-detecting)
-func createPIIInitializer() PIIInitializer {
-	return &PIIInitializerImpl{}
-}
 
 // MmBERT32KPIIInitializerImpl uses mmBERT-32K (YaRN RoPE, 32K context) for PII detection
 type MmBERT32KPIIInitializerImpl struct {
@@ -317,10 +301,6 @@ func (c *PIIInferenceImpl) ClassifyTokens(text string) (candle_binding.TokenClas
 	return candle_binding.ClassifyCandleBertTokens(text)
 }
 
-// createPIIInference creates the PII inference (auto-detecting)
-func createPIIInference() PIIInference {
-	return &PIIInferenceImpl{}
-}
 
 // MmBERT32KPIIInferenceImpl uses mmBERT-32K for PII token classification.
 // Entity types are returned as "LABEL_{class_id}" by Rust and translated Go-side via PIIMapping.
@@ -596,7 +576,7 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 		return nil, fmt.Errorf("failed to create jailbreak inference: %w", err)
 	}
 
-	// Create jailbreak initializer (only needed for Candle, nil for vLLM)
+	// Create jailbreak initializer (only needed for Candle/OpenVINO, nil for vLLM)
 	var jailbreakInitializer JailbreakInitializer
 	if !cfg.PromptGuard.UseVLLM {
 		if cfg.PromptGuard.UseMmBERT32K {

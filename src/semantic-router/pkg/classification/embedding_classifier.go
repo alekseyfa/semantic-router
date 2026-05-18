@@ -87,10 +87,6 @@ func (c *ExternalModelBasedEmbeddingInitializer) Init(qwen3ModelPath string, gem
 	return nil
 }
 
-// createEmbeddingInitializer creates the appropriate keyword embedding initializer based on configuration
-func createEmbeddingInitializer() EmbeddingClassifierInitializer {
-	return &ExternalModelBasedEmbeddingInitializer{}
-}
 
 // EmbeddingClassifier performs embedding-based similarity classification.
 // When preloading is enabled, candidate embeddings are computed once at initialization
