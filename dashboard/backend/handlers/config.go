@@ -436,6 +436,13 @@ except Exception as e:
 }
 
 func propagateConfigToRuntime(configPath string, configDir string) error {
+	// In local mode (AI_BINDING set, or SKIP_CONFIG_REGENERATE=true),
+	// the router watches config via fsnotify — no Python CLI regeneration needed.
+	if os.Getenv("SKIP_CONFIG_REGENERATE") == "true" || os.Getenv("AI_BINDING") != "" {
+		log.Printf("Config propagation: skipped (local router mode, fsnotify will reload)")
+		return nil
+	}
+
 	if isRunningInContainer() && isManagedContainerConfigPath(configPath) {
 		if err := regenerateRouterConfigSync(configPath, configDir); err != nil {
 			return err

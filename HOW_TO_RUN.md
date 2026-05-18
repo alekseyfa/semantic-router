@@ -209,8 +209,11 @@ Open **http://localhost:8702** in your browser.
 cd /home/gta/semantic-router
 source .venv/bin/activate
 
-# 1. Router + observability (Ctrl-C after "vLLM Semantic Router is running!")
-HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
+# 1. Router (local binary with OpenVINO backend)
+export OPENVINO_TOKENIZERS_LIB="$PWD/.venv/lib/python3.12/site-packages/openvino_tokenizers/lib/libopenvino_tokenizers.so"
+export LD_LIBRARY_PATH="$PWD/candle-binding/target/release:$PWD/openvino-binding/build:$PWD/nlp-binding/target/release:$PWD/ml-binding/target/release:$LD_LIBRARY_PATH"
+nohup ./bin/router --config config/config.yaml > /tmp/router.log 2>&1 &
+disown $!
 
 # 2. vLLM on Arc B570 (if not already running)
 docker start vllm-xpu   # starts existing container; see vLLM section below if missing
@@ -220,6 +223,14 @@ docker start vllm-xpu   # starts existing container; see vLLM section below if m
 
 # 4. Dashboard
 > /tmp/dashboard.log && nohup /home/gta/semantic-router/scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 & disown $!
+```
+
+### Alternative: Router via Docker (without OpenVINO)
+
+If you prefer the Docker-based router (uses candle backend, v0.3 config format):
+```bash
+HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
+# Ctrl-C after "vLLM Semantic Router is running!" — containers keep running
 ```
 
 ---
@@ -276,6 +287,8 @@ Expected dashboard status (all green):
 
 ```bash
 # One-time: start and keep as a persistent named container
+# NOTE: Check which card device exists: ls /dev/dri/card*
+#       On this machine it is card0 (no iGPU). Adjust if your setup differs.
 RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
 VIDEO_GID=$(stat -c '%g' /dev/dri/card0)
 
@@ -407,11 +420,131 @@ transparent proxy mode. For local dev, a STATIC cluster is simpler and reliable.
 
 ---
 
+## OpenVINO Backend (Local Router Binary)
+
+The router can use **OpenVINO** as the inference backend for classification models instead of
+candle (Rust). This provides optimized CPU inference via Intel's OpenVINO toolkit.
+
+### Prerequisites
+
+- OpenVINO runtime installed (via pip: `pip install openvino openvino-tokenizers`)
+- Models converted to OpenVINO IR format (`.xml` + `.bin`)
+- The `openvino-binding` C++ library built (`openvino-binding/build/libopenvino_semantic_router.so`)
+
+### Building the Router
+
+```bash
+cd /home/gta/semantic-router/src/semantic-router
+CGO_ENABLED=1 go build -o /home/gta/semantic-router/bin/router ./cmd/main.go
+```
+
+### Converting Models to OpenVINO IR
+
+Models must be in OpenVINO IR format. Convert from HuggingFace using `optimum-cli`:
+
+```bash
+source .venv/bin/activate
+
+# Domain/intent classifier
+optimum-cli export openvino \
+  --model LLM-Semantic-Router/lora_intent_classifier_bert-base-uncased_model \
+  --task text-classification \
+  models/mom-domain-classifier
+
+# PII token classifier
+optimum-cli export openvino \
+  --model LLM-Semantic-Router/lora_pii_detector_bert-base-uncased_model \
+  --task token-classification \
+  models/mom-pii-classifier
+
+# Jailbreak classifier
+optimum-cli export openvino \
+  --model LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model \
+  --task text-classification \
+  models/mom-jailbreak-classifier
+```
+
+After conversion, create tokenizer symlinks (required by the C++ binding):
+```bash
+for d in models/mom-domain-classifier models/mom-pii-classifier models/mom-jailbreak-classifier; do
+  ln -sf openvino_tokenizer.xml "$d/tokenizer.xml"
+  ln -sf openvino_tokenizer.bin "$d/tokenizer.bin"
+done
+```
+
+Also download the mapping files (not included in optimum export):
+```bash
+pip install huggingface_hub
+python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil, os
+for repo, files, dest in [
+    ('LLM-Semantic-Router/lora_intent_classifier_bert-base-uncased_model',
+     ['category_mapping.json', 'label_mapping.json'], 'models/mom-domain-classifier'),
+    ('LLM-Semantic-Router/lora_pii_detector_bert-base-uncased_model',
+     ['label_mapping.json', 'pii_type_mapping.json'], 'models/mom-pii-classifier'),
+    ('LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model',
+     ['jailbreak_type_mapping.json'], 'models/mom-jailbreak-classifier'),
+]:
+    for f in files:
+        path = hf_hub_download(repo, f)
+        shutil.copy2(path, os.path.join(dest, f))
+"
+# Symlink for jailbreak mapping (config references label_mapping.json)
+ln -sf jailbreak_type_mapping.json models/mom-jailbreak-classifier/label_mapping.json
+```
+
+### Config (`config/config.yaml`)
+
+Enable OpenVINO by adding `use_openvino: true` to the relevant sections:
+
+```yaml
+prompt_guard:
+  use_openvino: true
+  openvino_device: "CPU"   # or "GPU", "AUTO"
+
+classifier:
+  category_model:
+    use_openvino: true
+    openvino_device: "CPU"
+  pii_model:
+    use_openvino: true
+    openvino_device: "CPU"
+
+embedding_models:
+  use_openvino: true
+  openvino_device: "CPU"
+```
+
+### Running
+
+```bash
+cd /home/gta/semantic-router
+export OPENVINO_TOKENIZERS_LIB="$PWD/.venv/lib/python3.12/site-packages/openvino_tokenizers/lib/libopenvino_tokenizers.so"
+export LD_LIBRARY_PATH="$PWD/candle-binding/target/release:$PWD/openvino-binding/build:$PWD/nlp-binding/target/release:$PWD/ml-binding/target/release:$LD_LIBRARY_PATH"
+./bin/router --config config/config.yaml
+```
+
+### Verify
+
+```bash
+curl --noproxy localhost http://localhost:8080/health
+# → {"status": "healthy", "service": "classification-api"}
+
+curl --noproxy localhost http://localhost:8080/api/v1/classify/intent \
+  -H "Content-Type: application/json" \
+  -d '{"text": "What is machine learning?"}'
+# → {"classification":{"category":"...","confidence":...,"processing_time_ms":3}, ...}
+```
+
+---
+
 ## Stopping Everything
 
 ```bash
 source .venv/bin/activate
-vllm-sr stop                          # stops router + observability containers
+pkill -f 'bin/router'                 # stops local router (OpenVINO mode)
+vllm-sr stop                          # stops Docker router + observability containers
 docker stop vllm-xpu                  # stops vLLM (keeps container for fast restart)
 pkill -9 -f 'func-e\|envoy'          # stops Envoy
 pkill -f dashboard-server             # stops dashboard
@@ -464,6 +597,8 @@ docker run -d --privileged --net=host -p 8082:8082 intel/vllm:0.17.0-xpu --model
 |----------|----------|---------|---------|
 | `HF_TOKEN` | Yes (first run) | — | Download models from HuggingFace |
 | `HF_ENDPOINT` | No | `https://huggingface.co` | Use a mirror: `https://hf-mirror.com` |
+| `OPENVINO_TOKENIZERS_LIB` | Yes (OpenVINO mode) | — | Path to `libopenvino_tokenizers.so` |
+| `LD_LIBRARY_PATH` | Yes (local binary) | — | Must include paths to all `.so` binding libs |
 | `SR_LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, `error` |
 | `DISABLE_DASHBOARD` | No | — | Set to `true` for headless mode |
 | `DASHBOARD_PORT` | No | `8700` | Dashboard listen port (we use 8702 to avoid conflict) |
