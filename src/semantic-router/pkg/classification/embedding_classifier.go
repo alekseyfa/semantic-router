@@ -1,46 +1,247 @@
 package classification
 
 import (
+	"encoding/base64"
 	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
 
 	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
-// calculateSimilarityBatch is a package-level variable that points to the
-// actual implementation in the candle_binding package. It exists so tests can
-// override it.
-var calculateSimilarityBatch = candle_binding.CalculateSimilarityBatch
+// getEmbeddingWithModelType is a package-level variable for computing single embeddings.
+// It exists so tests can override it.
+var getEmbeddingWithModelType = candle_binding.GetEmbeddingWithModelType
+
+// getMultiModalTextEmbedding computes a text embedding via the multimodal model.
+// Package-level var so tests can override it.
+var getMultiModalTextEmbedding = func(text string, targetDim int) ([]float32, error) {
+	output, err := candle_binding.MultiModalEncodeText(text, targetDim)
+	if err != nil {
+		return nil, err
+	}
+	return output.Embedding, nil
+}
+
+// getMultiModalImageEmbedding computes an image embedding from a base64-encoded
+// image (raw base64 or data-URI) via the multimodal model.
+// Also supports local file paths for preloading knowledge-base image candidates.
+// Package-level var so tests can override it.
+var getMultiModalImageEmbedding = func(imageRef string, targetDim int) ([]float32, error) {
+	if imageRef == "" {
+		return nil, fmt.Errorf("imageRef cannot be empty")
+	}
+
+	payload := imageRef
+
+	// If imageRef is a local file path, read and base64-encode it
+	if strings.HasPrefix(imageRef, "/") || strings.HasPrefix(imageRef, "./") {
+		data, err := os.ReadFile(imageRef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read image file %q: %w", imageRef, err)
+		}
+		payload = base64.StdEncoding.EncodeToString(data)
+	} else if idx := strings.Index(imageRef, ";base64,"); idx >= 0 {
+		// Strip data-URI prefix if present (e.g. "data:image/png;base64,...")
+		payload = imageRef[idx+len(";base64,"):]
+	}
+
+	output, err := candle_binding.MultiModalEncodeImageFromBase64(payload, targetDim)
+	if err != nil {
+		return nil, err
+	}
+	return output.Embedding, nil
+}
+
+// initMultiModalModel is a package-level var for initializing the multimodal model.
+var initMultiModalModel = candle_binding.InitMultiModalEmbeddingModel
 
 // EmbeddingClassifierInitializer initializes KeywordEmbeddingClassifier for embedding based classification
 type EmbeddingClassifierInitializer interface {
-	Init(qwen3ModelPath string, gemmaModelPath string, useCPU bool) error
+	Init(qwen3ModelPath string, gemmaModelPath string, mmBertModelPath string, useCPU bool) error
 }
 
 type ExternalModelBasedEmbeddingInitializer struct{}
 
-func (c *ExternalModelBasedEmbeddingInitializer) Init(qwen3ModelPath string, gemmaModelPath string, useCPU bool) error {
-	err := candle_binding.InitEmbeddingModels(qwen3ModelPath, gemmaModelPath, useCPU)
+func (c *ExternalModelBasedEmbeddingInitializer) Init(qwen3ModelPath string, gemmaModelPath string, mmBertModelPath string, useCPU bool) error {
+	// Resolve model paths using registry (supports aliases like "qwen3", "gemma", "mmbert")
+	qwen3ModelPath = config.ResolveModelPath(qwen3ModelPath)
+	gemmaModelPath = config.ResolveModelPath(gemmaModelPath)
+	mmBertModelPath = config.ResolveModelPath(mmBertModelPath)
+
+	err := candle_binding.InitEmbeddingModels(qwen3ModelPath, gemmaModelPath, mmBertModelPath, useCPU)
 	if err != nil {
 		return err
 	}
-	logging.Infof("Initialized KeywordEmbedding classifier with qwen3 model path %q and gemma model path %s", qwen3ModelPath, gemmaModelPath)
+
+	if mmBertModelPath != "" {
+		logging.Infof("Initialized KeywordEmbedding classifier with mmBERT 2D Matryoshka support")
+	} else {
+		logging.Infof("Initialized KeywordEmbedding classifier")
+	}
 	return nil
 }
 
-// createEmbeddingInitializer creates the appropriate keyword embedding initializer based on configuration
-func createEmbeddingInitializer() EmbeddingClassifierInitializer {
-	return &ExternalModelBasedEmbeddingInitializer{}
-}
 
+// EmbeddingClassifier performs embedding-based similarity classification.
+// When preloading is enabled, candidate embeddings are computed once at initialization
+// and reused for all classification requests, significantly improving performance.
 type EmbeddingClassifier struct {
 	rules []config.EmbeddingRule
+
+	// Optimization: preloaded candidate embeddings
+	candidateEmbeddings map[string][]float32 // candidate text -> embedding vector
+
+	// Configuration
+	optimizationConfig config.HNSWConfig
+	preloadEnabled     bool
+	modelType          string // Model type to use for embeddings ("qwen3" or "gemma")
 }
 
-// NewKeywordClassifier creates a new KeywordEmbeddingClassifier.
-func NewEmbeddingClassifier(cfgRules []config.EmbeddingRule) (*EmbeddingClassifier, error) {
-	return &EmbeddingClassifier{rules: cfgRules}, nil
+// NewEmbeddingClassifier creates a new EmbeddingClassifier.
+// If optimization config has PreloadEmbeddings enabled, candidate embeddings
+// will be precomputed at initialization time for better runtime performance.
+func NewEmbeddingClassifier(cfgRules []config.EmbeddingRule, optConfig config.HNSWConfig) (*EmbeddingClassifier, error) {
+	// Apply defaults
+	optConfig = optConfig.WithDefaults()
+
+	c := &EmbeddingClassifier{
+		rules:               cfgRules,
+		candidateEmbeddings: make(map[string][]float32),
+		optimizationConfig:  optConfig,
+		preloadEnabled:      optConfig.PreloadEmbeddings,
+		modelType:           optConfig.ModelType, // Use configured model type
+	}
+
+	logging.Infof("EmbeddingClassifier initialized with model type: %s", c.modelType)
+
+	// If preloading is enabled, compute all candidate embeddings at startup
+	if optConfig.PreloadEmbeddings {
+		if err := c.preloadCandidateEmbeddings(); err != nil {
+			// Log warning but don't fail - fall back to runtime computation
+			logging.Warnf("Failed to preload candidate embeddings, falling back to runtime computation: %v", err)
+			c.preloadEnabled = false
+		}
+	}
+
+	return c, nil
+}
+
+// preloadCandidateEmbeddings computes embeddings for all unique candidates across all rules
+// Uses concurrent processing for better performance
+func (c *EmbeddingClassifier) preloadCandidateEmbeddings() error {
+	startTime := time.Now()
+
+	// Collect all unique candidates
+	uniqueCandidates := make(map[string]bool)
+	for _, rule := range c.rules {
+		for _, candidate := range rule.Candidates {
+			uniqueCandidates[candidate] = true
+		}
+	}
+
+	if len(uniqueCandidates) == 0 {
+		logging.Infof("No candidates to preload")
+		return nil
+	}
+
+	// Determine model type
+	modelType := c.getModelType()
+
+	logging.Infof("[Embedding Signal] Preloading embeddings for %d unique candidates using model: %s (dimension: %d) with concurrent processing...",
+		len(uniqueCandidates), modelType, c.optimizationConfig.TargetDimension)
+
+	// Convert map to slice for concurrent processing
+	candidates := make([]string, 0, len(uniqueCandidates))
+	for candidate := range uniqueCandidates {
+		candidates = append(candidates, candidate)
+	}
+
+	// Use worker pool for concurrent embedding generation
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers > len(candidates) {
+		numWorkers = len(candidates)
+	}
+
+	type result struct {
+		candidate string
+		embedding []float32
+		err       error
+	}
+
+	resultChan := make(chan result, len(candidates))
+	candidateChan := make(chan string, len(candidates))
+
+	// Send all candidates to channel
+	for _, candidate := range candidates {
+		candidateChan <- candidate
+	}
+	close(candidateChan)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for candidate := range candidateChan {
+				output, err := getEmbeddingWithModelType(candidate, modelType, c.optimizationConfig.TargetDimension)
+				if err != nil {
+					resultChan <- result{candidate: candidate, err: err}
+				} else {
+					resultChan <- result{candidate: candidate, embedding: output.Embedding}
+				}
+			}
+		}(i)
+	}
+
+	// Close result channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	var firstError error
+	successCount := 0
+	for res := range resultChan {
+		if res.err != nil {
+			if firstError == nil {
+				firstError = fmt.Errorf("failed to compute embedding for candidate %q: %w", res.candidate, res.err)
+			}
+			logging.Warnf("Failed to compute embedding for candidate %q: %v", res.candidate, res.err)
+		} else {
+			c.candidateEmbeddings[res.candidate] = res.embedding
+			successCount++
+		}
+	}
+
+	elapsed := time.Since(startTime)
+	logging.Infof("[Embedding Signal] Preloaded %d/%d candidate embeddings using model %s in %v (workers: %d)",
+		successCount, len(candidates), modelType, elapsed, numWorkers)
+
+	if firstError != nil {
+		return firstError
+	}
+
+	return nil
+}
+
+// getModelType returns the model type to use for embeddings
+func (c *EmbeddingClassifier) getModelType() string {
+	// Check for test override via environment variable
+	if model := os.Getenv("EMBEDDING_MODEL_OVERRIDE"); model != "" {
+		logging.Infof("Embedding model override from env: %s", model)
+		return model
+	}
+	// Use the configured model type from config
+	// This ensures consistency between preload and runtime
+	return c.modelType
 }
 
 // IsKeywordEmbeddingClassifierEnabled checks if Keyword embedding classification rules are properly configured
@@ -53,87 +254,292 @@ func (c *Classifier) initializeKeywordEmbeddingClassifier() error {
 	if !c.IsKeywordEmbeddingClassifierEnabled() || c.keywordEmbeddingInitializer == nil {
 		return fmt.Errorf("keyword embedding similarity match is not properly configured")
 	}
-	return c.keywordEmbeddingInitializer.Init(c.Config.InlineModels.Qwen3ModelPath, c.Config.InlineModels.GemmaModelPath, c.Config.InlineModels.EmbeddingModels.UseCPU)
+
+	modelType := strings.ToLower(strings.TrimSpace(c.Config.EmbeddingModels.HNSWConfig.ModelType))
+	if modelType == "multimodal" {
+		mmPath := config.ResolveModelPath(c.Config.EmbeddingModels.MultiModalModelPath)
+		if mmPath == "" {
+			return fmt.Errorf("embedding_rules with model_type=multimodal requires embedding_models.multimodal_model_path")
+		}
+		if err := initMultiModalModel(mmPath, c.Config.EmbeddingModels.UseCPU); err != nil {
+			return fmt.Errorf("failed to initialize multimodal model for embedding_rules: %w", err)
+		}
+		logging.Infof("Initialized KeywordEmbedding classifier with multimodal model: %s", mmPath)
+		return nil
+	}
+
+	// Initialize with all three model paths (qwen3, gemma, mmbert)
+	// The Init method will handle path resolution and choose the appropriate FFI function
+	return c.keywordEmbeddingInitializer.Init(
+		c.Config.Qwen3ModelPath,
+		c.Config.GemmaModelPath,
+		c.Config.EmbeddingModels.MmBertModelPath,
+		c.Config.EmbeddingModels.UseCPU,
+	)
 }
 
-// Classify performs keyword-based embedding similarity classification on the given text.
+// Classify performs Embedding similarity classification on the given text.
+// Returns the single best matching rule. Wraps ClassifyAll internally.
 func (c *EmbeddingClassifier) Classify(text string) (string, float64, error) {
-	var bestScore float32
-	var mostMatchedRule string
-	for _, rule := range c.rules {
-		matched, aggregatedScore, err := c.matches(text, rule) // Error handled
-		if err != nil {
-			return "", 0.0, err // Propagate error
-		}
-		if matched {
-			if len(rule.Candidates) > 0 {
-				logging.Infof("Keyword-based embedding similarity classification matched rule %q with candidates: %v, confidence score %s", rule.Name, rule.Candidates, aggregatedScore)
-			} else {
-				logging.Infof("Keyword-based embedding similarity classification do not match rule %q with candidates: %v, confidence score %s", rule.Name, rule.Candidates, aggregatedScore)
-			}
-			if aggregatedScore > bestScore {
-				bestScore = aggregatedScore
-				mostMatchedRule = rule.Name
-			}
+	matched, err := c.ClassifyAll(text)
+	if err != nil {
+		return "", 0.0, err
+	}
+	if len(matched) == 0 {
+		return "", 0.0, nil
+	}
+	best := matched[0]
+	for _, m := range matched[1:] {
+		if m.Score > best.Score {
+			best = m
 		}
 	}
-	return mostMatchedRule, float64(bestScore), nil
+	return best.RuleName, best.Score, nil
 }
 
-// matches checks if the text matches the given keyword rule.
-func (c *EmbeddingClassifier) matches(text string, rule config.EmbeddingRule) (bool, float32, error) {
+// ClassifyAll performs Embedding similarity classification on the given text.
+// Returns ALL rules that matched their threshold (not just the single best).
+// Enables AND conditions in the Decision Engine (e.g., embedding:"ai" AND embedding:"programming").
+func (c *EmbeddingClassifier) ClassifyAll(text string) ([]MatchedRule, error) {
+	if len(c.rules) == 0 {
+		return nil, nil
+	}
+
 	// Validate input
 	if text == "" {
-		return false, 0.0, fmt.Errorf("keyword-based embedding similarity classification: query must be provided")
-	}
-	if len(rule.Candidates) == 0 {
-		return false, 0.0, fmt.Errorf("keyword-based embedding similarity classification: candidates must be provided")
+		return nil, fmt.Errorf("embedding similarity classification: query must be provided")
 	}
 
-	// Calculate batch similarity using default model (auto) and dimension (768)
-	result, err := calculateSimilarityBatch(
-		text,
-		rule.Candidates,
-		0,      // return scores for all the candidates
-		"auto", // use auto model selection
-		768,    // use default dimension
-	)
+	startTime := time.Now()
+
+	// Step 1: Compute query embedding once
+	modelType := c.getModelType()
+	queryOutput, err := getEmbeddingWithModelType(text, modelType, c.optimizationConfig.TargetDimension)
 	if err != nil {
-		return false, 0.0, fmt.Errorf("keyword-based embedding similarity classification: failed to calculate batch similarity: %w", err)
+		return nil, fmt.Errorf("failed to compute query embedding: %w", err)
 	}
-	// Check for matches based on the aggregation method
-	switch rule.AggregationMethodConfiged {
-	case config.AggregationMethodMean:
-		var aggregatedScore float32
-		for _, match := range result.Matches {
-			aggregatedScore += match.Similarity
-		}
-		aggregatedScore /= float32(len(result.Matches))
-		if aggregatedScore >= rule.SimilarityThreshold {
-			return true, aggregatedScore, nil
-		} else {
-			return false, aggregatedScore, nil
-		}
-	case config.AggregationMethodMax:
-		var aggregatedScore float32
-		for _, match := range result.Matches {
-			if match.Similarity > aggregatedScore {
-				aggregatedScore = match.Similarity
-			}
-		}
-		if aggregatedScore >= rule.SimilarityThreshold {
-			return true, aggregatedScore, nil
-		} else {
-			return false, aggregatedScore, nil
-		}
-	case config.AggregationMethodAny:
-		for _, match := range result.Matches {
-			if match.Similarity >= rule.SimilarityThreshold {
-				return true, rule.SimilarityThreshold, nil
-			}
-		}
-		return false, 0.0, nil
+	queryEmbedding := queryOutput.Embedding
 
+	logging.Infof("Computed query embedding (model: %s, dimension: %d)", modelType, len(queryEmbedding))
+
+	// Step 2: Search all candidates once and get similarities
+	candidateSimilarities, err := c.searchAllCandidates(queryEmbedding)
+	if err != nil {
+		return nil, err
 	}
-	return false, 0.0, fmt.Errorf("keyword-based embedding similarity classification: unsupported keyword rule aggregation method: %q", rule.AggregationMethodConfiged)
+
+	logging.Infof("Computed %d candidate similarities in %v", len(candidateSimilarities), time.Since(startTime))
+
+	// Step 3: Aggregate scores per rule and find all matches
+	matched := c.findAllMatchedRules(candidateSimilarities)
+
+	elapsed := time.Since(startTime)
+	logging.Infof("ClassifyAll completed in %v: %d rules matched out of %d", elapsed, len(matched), len(c.rules))
+
+	return matched, nil
+}
+
+// searchAllCandidates computes similarities for all candidates in one pass
+// Always uses brute-force to ensure we get ALL candidate similarities
+func (c *EmbeddingClassifier) searchAllCandidates(queryEmbedding []float32) (map[string]float32, error) {
+	// Lazy fallback: if candidate embeddings are empty (preload was disabled or failed),
+	// compute them now on the first request. This ensures the embedding signal always works
+	if len(c.candidateEmbeddings) == 0 && !c.preloadEnabled {
+		logging.Warnf("[Embedding Signal] No preloaded candidate embeddings found — computing at runtime")
+		if err := c.preloadCandidateEmbeddings(); err != nil {
+			logging.Errorf("[Embedding Signal] Runtime embedding computation also failed: %v", err)
+			// Mark as attempted so we don't retry on every subsequent request
+			c.preloadEnabled = true
+			return nil, fmt.Errorf("failed to compute candidate embeddings at runtime: %w", err)
+		}
+		c.preloadEnabled = true
+		logging.Infof("[Embedding Signal] Lazy fallback succeeded — candidate embeddings now cached for subsequent requests")
+	}
+
+	candidateSimilarities := make(map[string]float32)
+	totalCandidates := len(c.candidateEmbeddings)
+
+	// For embedding classification, we MUST compute similarities for ALL candidates
+	// to correctly aggregate scores per rule and find the best match.
+	// HNSW is an approximate algorithm designed for topK search, not exhaustive search.
+	// Even with large ef values, HNSW may miss some candidates due to graph connectivity.
+	//
+	// Brute-force is the right choice here because:
+	// 1. We need complete results (all candidates), not approximate topK
+	// 2. Candidate sets are typically small (50-200), making brute-force very fast
+	// 3. Embeddings are pre-loaded in memory, so it's just dot products (microseconds each)
+	// 4. Simpler and more reliable than tuning HNSW parameters
+
+	logging.Infof("Computing similarities for all %d candidates (brute-force)", totalCandidates)
+
+	for candidate, embedding := range c.candidateEmbeddings {
+		sim := cosineSimilarity(queryEmbedding, embedding)
+		candidateSimilarities[candidate] = sim
+		logging.Debugf("[Brute-force] candidate=%q, similarity=%.4f", candidate, sim)
+	}
+
+	return candidateSimilarities, nil
+}
+
+// MatchedRule holds the result for a matched embedding rule
+type MatchedRule struct {
+	RuleName string
+	Score    float64
+	Method   string // "hard" or "soft"
+}
+
+// findAllMatchedRules aggregates candidate similarities per rule and returns ALL that passed
+func (c *EmbeddingClassifier) findAllMatchedRules(candidateSimilarities map[string]float32) []MatchedRule {
+	var matched []MatchedRule
+
+	// Phase 1: Collect all hard matches (score >= rule threshold)
+	for _, rule := range c.rules {
+		if len(rule.Candidates) == 0 {
+			continue
+		}
+
+		// Collect similarities for this rule's candidates
+		similarities := make([]float32, 0, len(rule.Candidates))
+		for _, candidate := range rule.Candidates {
+			if sim, ok := candidateSimilarities[candidate]; ok {
+				similarities = append(similarities, sim)
+			}
+		}
+		if len(similarities) == 0 {
+			continue
+		}
+
+		// Aggregate based on method
+		aggregatedScore := c.aggregateScoresForRule(similarities, rule.AggregationMethodConfiged)
+
+		logging.Infof("Rule %q: aggregated_score=%.4f, threshold=%.3f, matched=%v (method=%s, candidates=%d)",
+			rule.Name, aggregatedScore, rule.SimilarityThreshold,
+			aggregatedScore >= rule.SimilarityThreshold,
+			rule.AggregationMethodConfiged, len(similarities))
+
+		if aggregatedScore >= rule.SimilarityThreshold {
+			logging.Infof("Hard match found: rule=%q, score=%.4f", rule.Name, aggregatedScore)
+			matched = append(matched, MatchedRule{
+				RuleName: rule.Name,
+				Score:    float64(aggregatedScore),
+				Method:   "hard",
+			})
+		}
+	}
+
+	if len(matched) > 0 {
+		return matched
+	}
+
+	// Phase 2: No hard matches — check if soft matching is enabled
+	if c.optimizationConfig.EnableSoftMatching == nil || !*c.optimizationConfig.EnableSoftMatching {
+		logging.Infof("No hard match found and soft matching is disabled")
+		return nil
+	}
+
+	// Find soft matches (score >= global min threshold)
+	for _, rule := range c.rules {
+		if len(rule.Candidates) == 0 {
+			continue
+		}
+
+		// Collect similarities for this rule's candidates
+		similarities := make([]float32, 0, len(rule.Candidates))
+		for _, candidate := range rule.Candidates {
+			if sim, ok := candidateSimilarities[candidate]; ok {
+				similarities = append(similarities, sim)
+			}
+		}
+		if len(similarities) == 0 {
+			continue
+		}
+
+		aggregatedScore := c.aggregateScoresForRule(similarities, rule.AggregationMethodConfiged)
+		if aggregatedScore >= c.optimizationConfig.MinScoreThreshold {
+			logging.Infof("Soft match found: rule=%q, score=%.4f (min_threshold=%.3f)",
+				rule.Name, aggregatedScore, c.optimizationConfig.MinScoreThreshold)
+			matched = append(matched, MatchedRule{
+				RuleName: rule.Name,
+				Score:    float64(aggregatedScore),
+				Method:   "soft",
+			})
+		}
+	}
+
+	if len(matched) == 0 {
+		logging.Infof("No match found (best score below min_threshold=%.3f)", c.optimizationConfig.MinScoreThreshold)
+	}
+
+	return matched
+}
+
+// aggregateScoresForRule applies the aggregation method to compute the final score
+func (c *EmbeddingClassifier) aggregateScoresForRule(similarities []float32, method config.AggregationMethod) float32 {
+	if len(similarities) == 0 {
+		return 0.0
+	}
+
+	switch method {
+	case config.AggregationMethodMean:
+		var sum float32
+		for _, sim := range similarities {
+			sum += sim
+		}
+		return sum / float32(len(similarities))
+
+	case config.AggregationMethodMax:
+		var max float32
+		for _, sim := range similarities {
+			if sim > max {
+				max = sim
+			}
+		}
+		return max
+
+	case config.AggregationMethodAny:
+		// For "any" method, return the max similarity
+		// The threshold check will be done by the caller
+		var max float32
+		for _, sim := range similarities {
+			if sim > max {
+				max = sim
+			}
+		}
+		return max
+
+	default:
+		logging.Warnf("Unsupported aggregation method: %q, using max", method)
+		var max float32
+		for _, sim := range similarities {
+			if sim > max {
+				max = sim
+			}
+		}
+		return max
+	}
+}
+
+// cosineSimilarity computes cosine similarity between two vectors.
+// Assumes vectors are normalized (which they should be from BERT-style models).
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+
+	var dotProduct float32
+	for i := 0; i < minLen; i++ {
+		dotProduct += a[i] * b[i]
+	}
+
+	return dotProduct
+}
+
+// GetPreloadStats returns statistics about preloaded embeddings
+func (c *EmbeddingClassifier) GetPreloadStats() int {
+	return len(c.candidateEmbeddings)
 }

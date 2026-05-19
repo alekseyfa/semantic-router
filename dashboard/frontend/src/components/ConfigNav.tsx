@@ -1,15 +1,14 @@
 import React from 'react'
 import styles from './ConfigNav.module.css'
 
+// New navigation structure aligned with Python CLI config format
 export type ConfigSection =
-  | 'models'
-  | 'prompt-guard'
-  | 'similarity-cache'
-  | 'intelligent-routing'
-  | 'topology'
-  | 'tools-selection'
-  | 'observability'
-  | 'classification-api'
+  | 'signals'        // config.yaml: signals (keywords, embeddings, domains, etc.)
+  | 'decisions'      // config.yaml: decisions (routing rules)
+  | 'models'         // config.yaml: providers.models
+  | 'router-config'  // .vllm-sr/router-defaults.yaml (cache, prompt guard, tools, etc.)
+  | 'mcp'            // MCP servers configuration
+  | 'topology'       // Separate page for visualization
 
 interface ConfigNavProps {
   activeSection: ConfigSection
@@ -22,49 +21,37 @@ const ConfigNav: React.FC<ConfigNavProps> = ({ activeSection, onSectionChange })
       id: 'models' as ConfigSection,
       icon: '🤖',
       title: 'Models',
-      description: 'User defined models and endpoints'
+      description: 'Provider models and endpoints'
     },
     {
-      id: 'prompt-guard' as ConfigSection,
-      icon: '🛡️',
-      title: 'Prompt Guard',
-      description: 'PII and jailbreak ModernBERT detection'
+      id: 'decisions' as ConfigSection,
+      icon: '🔀',
+      title: 'Decisions',
+      description: 'Routing rules with priorities & plugins'
     },
     {
-      id: 'similarity-cache' as ConfigSection,
-      icon: '⚡',
-      title: 'Similarity Cache',
-      description: 'Similarity BERT configuration'
+      id: 'signals' as ConfigSection,
+      icon: '📡',
+      title: 'Signals',
+      description: 'Keywords, embeddings, domains & preferences'
     },
     {
-      id: 'intelligent-routing' as ConfigSection,
-      icon: '🧠',
-      title: 'Intelligent Routing',
-      description: 'Classify BERT, categories & reasoning'
+      id: 'router-config' as ConfigSection,
+      icon: '⚙️',
+      title: 'Router Configuration',
+      description: 'Cache, prompt guard, tools & observability'
+    },
+    {
+      id: 'mcp' as ConfigSection,
+      icon: '🔌',
+      title: 'MCP Servers & Tools',
+      description: 'MCP servers and all available tools'
     },
     {
       id: 'topology' as ConfigSection,
       icon: '🗺️',
       title: 'Topology',
-      description: 'Visualize routing chain-of-thought'
-    },
-    {
-      id: 'tools-selection' as ConfigSection,
-      icon: '🔧',
-      title: 'Tools Selection',
-      description: 'Tools configuration and database'
-    },
-    {
-      id: 'observability' as ConfigSection,
-      icon: '📊',
-      title: 'Observability',
-      description: 'Tracing and metrics'
-    },
-    {
-      id: 'classification-api' as ConfigSection,
-      icon: '🔌',
-      title: 'Classification API',
-      description: 'Batch classification settings'
+      description: 'Visualize signal-driven routing flow'
     }
   ]
 

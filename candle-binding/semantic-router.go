@@ -6,11 +6,22 @@
 package candle_binding
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"log"
+	"math"
+	"net/http"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -39,7 +50,26 @@ extern bool init_modernbert_jailbreak_classifier(const char* model_id, bool use_
 
 extern bool init_deberta_jailbreak_classifier(const char* model_id, bool use_cpu);
 
+extern bool init_fact_check_classifier(const char* model_id, bool use_cpu);
+
+extern bool init_feedback_detector(const char* model_id, bool use_cpu);
+
 extern bool init_modernbert_pii_token_classifier(const char* model_id, bool use_cpu);
+
+// mmBERT (multilingual ModernBERT) initialization functions
+extern bool init_mmbert_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_classifier_auto(const char* model_id, bool use_cpu);
+extern bool init_mmbert_token_classifier(const char* model_id, bool use_cpu);
+extern bool is_mmbert_model(const char* config_path);
+
+// mmBERT-32K (YaRN RoPE scaled, 32K context) initialization functions
+extern bool init_mmbert_32k_intent_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_32k_factcheck_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_32k_jailbreak_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_32k_feedback_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_32k_pii_classifier(const char* model_id, bool use_cpu);
+extern bool init_mmbert_32k_modality_classifier(const char* model_id, bool use_cpu);
+extern bool is_mmbert_32k_model(const char* config_path);
 
 // Token classification structures
 typedef struct {
@@ -206,8 +236,12 @@ extern EmbeddingResult get_text_embedding(const char* text, int max_length);
 extern int get_embedding_smart(const char* text, float quality_priority, float latency_priority, EmbeddingResult* result);
 extern int get_embedding_with_dim(const char* text, float quality_priority, float latency_priority, int target_dim, EmbeddingResult* result);
 extern int get_embedding_with_model_type(const char* text, const char* model_type, int target_dim, EmbeddingResult* result);
+extern int get_embedding_2d_matryoshka(const char* text, const char* model_type, int target_layer, int target_dim, EmbeddingResult* result);
 extern int get_embedding_batched(const char* text, const char* model_type, int target_dim, EmbeddingResult* result);
 extern bool init_embedding_models(const char* qwen3_model_path, const char* gemma_model_path, bool use_cpu);
+extern bool init_embedding_models_with_mmbert(const char* qwen3_model_path, const char* gemma_model_path, const char* mmbert_model_path, bool use_cpu);
+extern bool init_mmbert_embedding_model(const char* model_path, bool use_cpu);
+extern bool init_multimodal_embedding_model(const char* model_path, bool use_cpu);
 extern bool init_embedding_models_batched(const char* qwen3_model_path, int max_batch_size, unsigned long long max_wait_ms, bool use_cpu);
 extern int calculate_embedding_similarity(const char* text1, const char* text2, const char* model_type, int target_dim, EmbeddingSimilarityResult* result);
 extern int calculate_similarity_batch(const char* query, const char** candidates, int num_candidates, int top_k, const char* model_type, int target_dim, BatchSimilarityResult* result);
@@ -217,6 +251,20 @@ extern void free_embedding_models_info(EmbeddingModelsInfoResult* result);
 extern TokenizationResult tokenize_text(const char* text, int max_length);
 extern void free_cstring(char* s);
 extern void free_embedding(float* data, int length);
+
+// Multi-modal embedding structures and functions
+typedef struct {
+    float* data;
+    int length;
+    bool error;
+    int modality;              // 0=text, 1=image, 2=audio
+    float processing_time_ms;
+} MultiModalEmbeddingResult;
+
+extern int multimodal_encode_text(const char* text, int target_dim, MultiModalEmbeddingResult* result);
+extern int multimodal_encode_image(const float* pixel_data, int height, int width, int target_dim, MultiModalEmbeddingResult* result);
+extern int multimodal_encode_audio(const float* mel_data, int n_mels, int time_frames, int target_dim, MultiModalEmbeddingResult* result);
+extern void free_multimodal_embedding(float* data, int length);
 extern void free_tokenization_result(TokenizationResult result);
 extern ClassificationResult classify_text(const char* text);
 extern ClassificationResultWithProbs classify_text_with_probabilities(const char* text);
@@ -224,12 +272,24 @@ extern void free_probabilities(float* probabilities, int num_classes);
 extern ClassificationResult classify_pii_text(const char* text);
 extern ClassificationResult classify_jailbreak_text(const char* text);
 extern ClassificationResult classify_bert_text(const char* text);
+extern bool init_qwen3_preference_classifier(const char* model_path, bool use_cpu);
+extern ClassificationResult classify_qwen3_preference(const char* text, const char* labels_json);
 extern ModernBertClassificationResult classify_modernbert_text(const char* text);
 extern ModernBertClassificationResultWithProbs classify_modernbert_text_with_probabilities(const char* text);
 extern void free_modernbert_probabilities(float* probabilities, int num_classes);
 extern ModernBertClassificationResult classify_modernbert_pii_text(const char* text);
 extern ModernBertClassificationResult classify_modernbert_jailbreak_text(const char* text);
 extern ClassificationResult classify_deberta_jailbreak_text(const char* text);
+extern ModernBertClassificationResult classify_fact_check_text(const char* text);
+extern ModernBertClassificationResult classify_feedback_text(const char* text);
+
+// mmBERT-32K classification functions (32K context, YaRN RoPE scaling)
+extern ModernBertClassificationResult classify_mmbert_32k_intent(const char* text);
+extern ModernBertClassificationResult classify_mmbert_32k_factcheck(const char* text);
+extern ModernBertClassificationResult classify_mmbert_32k_jailbreak(const char* text);
+extern ModernBertClassificationResult classify_mmbert_32k_feedback(const char* text);
+extern ModernBertTokenClassificationResult classify_mmbert_32k_pii_tokens(const char* text);
+extern ModernBertClassificationResult classify_mmbert_32k_modality(const char* text);
 
 // New official Candle BERT functions
 extern bool init_candle_bert_classifier(const char* model_path, int num_classes, bool use_cpu);
@@ -237,6 +297,116 @@ extern bool init_candle_bert_token_classifier(const char* model_path, int num_cl
 extern ClassificationResult classify_candle_bert_text(const char* text);
 extern BertTokenClassificationResult classify_candle_bert_tokens(const char* text);
 extern BertTokenClassificationResult classify_candle_bert_tokens_with_labels(const char* text, const char* id2label_json);
+
+// ================================================================================================
+// HALLUCINATION DETECTION STRUCTURES (Token-level Detection + NLI)
+// ================================================================================================
+
+// HallucinationSpan represents a detected hallucinated span
+typedef struct {
+    char* text;
+    int start;
+    int end;
+    float confidence;
+    char* label;
+} HallucinationSpan;
+
+// HallucinationDetectionResult from hallucination detection model
+typedef struct {
+    bool has_hallucination;
+    float confidence;
+    HallucinationSpan* spans;
+    int num_spans;
+    bool error;
+    char* error_message;
+} HallucinationDetectionResult;
+
+// NLI label enum
+typedef enum {
+    NLI_ENTAILMENT = 0,
+    NLI_NEUTRAL = 1,
+    NLI_CONTRADICTION = 2,
+    NLI_ERROR = -1
+} NLILabel;
+
+// NLI classification result
+typedef struct {
+    NLILabel label;
+    float confidence;
+    float entailment_prob;
+    float neutral_prob;
+    float contradiction_prob;
+    bool error;
+    char* error_message;
+} NLIResult;
+
+// EnhancedHallucinationSpan with NLI explanation
+typedef struct {
+    char* text;
+    int start;
+    int end;
+    float hallucination_confidence;
+    NLILabel nli_label;
+    float nli_confidence;
+    int severity;
+    char* explanation;
+} EnhancedHallucinationSpan;
+
+// Enhanced hallucination detection result with NLI
+typedef struct {
+    bool has_hallucination;
+    float confidence;
+    EnhancedHallucinationSpan* spans;
+    int num_spans;
+    bool error;
+    char* error_message;
+} EnhancedHallucinationDetectionResult;
+
+// Initialize hallucination detection model
+extern bool init_hallucination_model(const char* model_path, bool use_cpu);
+
+// Initialize NLI model (ModernBERT-based NLI)
+extern bool init_nli_model(const char* model_path, bool use_cpu);
+
+// Check if NLI model is initialized
+extern bool is_nli_model_initialized();
+
+// Detect hallucinations in answer given context
+// threshold: confidence threshold for hallucination detection (0.0-1.0)
+extern HallucinationDetectionResult detect_hallucinations(
+    const char* context,
+    const char* question,
+    const char* answer,
+    float threshold
+);
+
+// Detect hallucinations with NLI explanations
+// threshold: confidence threshold for hallucination detection (0.0-1.0)
+extern EnhancedHallucinationDetectionResult detect_hallucinations_with_nli(
+    const char* context,
+    const char* question,
+    const char* answer,
+    float threshold
+);
+
+// Classify NLI for premise-hypothesis pair
+extern NLIResult classify_nli(
+    const char* premise,
+    const char* hypothesis
+);
+
+// Free hallucination detection result
+extern void free_hallucination_detection_result(HallucinationDetectionResult result);
+
+// Free enhanced hallucination detection result
+extern void free_enhanced_hallucination_detection_result(EnhancedHallucinationDetectionResult result);
+
+// Free NLI result
+extern void free_nli_result(NLIResult result);
+
+// ================================================================================================
+// END OF HALLUCINATION DETECTION STRUCTURES
+// ================================================================================================
 
 // LoRA Unified Classifier C structures
 typedef struct {
@@ -269,6 +439,22 @@ typedef struct {
 extern bool init_lora_unified_classifier(const char* intent_model_path, const char* pii_model_path, const char* security_model_path, const char* architecture, bool use_cpu);
 extern LoRABatchResult classify_batch_with_lora(const char** texts, int num_texts);
 extern void free_lora_batch_result(LoRABatchResult result);
+
+// =============================================================================
+// MLP Selector for Model Selection (GPU-accelerated)
+// Reference: FusionFactory (arXiv:2507.10540) - Query-level fusion via tailored LLM routers
+// =============================================================================
+extern void* candle_mlp_new();
+extern void* candle_mlp_new_with_device(int device_type);
+extern void* candle_mlp_new_with_device_and_dtype(int device_type, int dtype);
+extern void candle_mlp_free(void* handle);
+extern char* candle_mlp_select(void* handle, double* query, size_t query_len);
+extern int candle_mlp_is_trained(void* handle);
+extern char* candle_mlp_to_json(void* handle);
+extern void* candle_mlp_from_json(char* json);
+extern void* candle_mlp_from_json_with_device(char* json, int device_type);
+extern void* candle_mlp_from_json_with_device_and_dtype(char* json, int device_type, int dtype);
+extern void candle_mlp_free_string(char* ptr);
 */
 import "C"
 
@@ -294,6 +480,12 @@ var (
 	bertTokenClassifierInitErr            error
 	debertaJailbreakClassifierInitOnce    sync.Once
 	debertaJailbreakClassifierInitErr     error
+	factCheckClassifierInitOnce           sync.Once
+	factCheckClassifierInitErr            error
+	feedbackDetectorInitOnce              sync.Once
+	feedbackDetectorInitErr               error
+	qwenPreferenceInitOnce                sync.Once
+	qwenPreferenceInitErr                 error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -310,8 +502,9 @@ type SimResult struct {
 
 // ClassResult represents the result of a text classification
 type ClassResult struct {
-	Class      int     // Class index
-	Confidence float32 // Confidence score
+	Class      int      // Class index
+	Confidence float32  // Confidence score
+	Categories []string // Violation categories (e.g., "Violent", "Jailbreak") - only populated when unsafe/controversial
 }
 
 // ClassResultWithProbs represents the result of a text classification with full probability distribution
@@ -477,21 +670,7 @@ func GetEmbedding(text string, maxLength int) ([]float32, error) {
 	}
 
 	// Convert the C array to a Go slice
-	length := int(result.length)
-	embedding := make([]float32, length)
-
-	if length > 0 {
-		// Create a slice that refers to the C array
-		cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-
-		// Copy and convert each value
-		for i := 0; i < length; i++ {
-			embedding[i] = float32(cFloats[i])
-		}
-
-		// Free the memory allocated in Rust
-		C.free_embedding(result.data, result.length)
-	}
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
 	return embedding, nil
 }
@@ -569,18 +748,7 @@ func GetEmbeddingSmart(text string, qualityPriority, latencyPriority float32) ([
 		return nil, fmt.Errorf("embedding generation returned zero-length result")
 	}
 
-	embedding := make([]float32, length)
-
-	// Create a slice that refers to the C array
-	cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-
-	// Copy and convert each value
-	for i := 0; i < length; i++ {
-		embedding[i] = float32(cFloats[i])
-	}
-
-	// Free the memory allocated in Rust
-	C.free_embedding(result.data, result.length)
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
 	return embedding, nil
 }
@@ -664,15 +832,7 @@ func GetEmbeddingBatched(text string, modelType string, targetDim int) (*Embeddi
 	}
 
 	// Convert C array to Go slice
-	length := int(result.length)
-	embedding := make([]float32, length)
-	cArray := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-	for i := 0; i < length; i++ {
-		embedding[i] = float32(cArray[i])
-	}
-
-	// Free the C memory
-	C.free_embedding(result.data, result.length)
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
 	return &EmbeddingOutput{
 		Embedding:        embedding,
@@ -682,15 +842,16 @@ func GetEmbeddingBatched(text string, modelType string, targetDim int) (*Embeddi
 	}, nil
 }
 
-// InitEmbeddingModels initializes Qwen3 and/or Gemma embedding models (standard version).
+// InitEmbeddingModels initializes Qwen3, Gemma, and/or mmBERT embedding models (standard version).
 //
 // Note: For high-concurrency workloads, use InitEmbeddingModelsBatched instead for 2-5x better throughput.
 //
-// This function must be called before using GetEmbeddingWithDim for Qwen3/Gemma models.
+// This function must be called before using GetEmbeddingWithDim for Qwen3/Gemma/mmBERT models.
 //
 // Parameters:
 //   - qwen3ModelPath: Path to Qwen3 model directory (or empty string "" to skip)
 //   - gemmaModelPath: Path to Gemma model directory (or empty string "" to skip)
+//   - mmBertModelPath: Path to mmBERT model directory (or empty string "" to skip)
 //   - useCPU: If true, use CPU for inference; if false, use GPU if available
 //
 // Returns:
@@ -698,18 +859,20 @@ func GetEmbeddingBatched(text string, modelType string, targetDim int) (*Embeddi
 //
 // Example:
 //
-//	// Load both models on GPU
+//	// Load all three models on GPU
 //	err := InitEmbeddingModels(
 //	    "/path/to/qwen3-0.6B",
 //	    "/path/to/embeddinggemma-300m",
+//	    "/path/to/mom-embedding-ultra",
 //	    false,
 //	)
 //
-//	// Load only Gemma on CPU
-//	err := InitEmbeddingModels("", "/path/to/embeddinggemma-300m", true)
-func InitEmbeddingModels(qwen3ModelPath, gemmaModelPath string, useCPU bool) error {
+//	// Load only mmBERT on CPU
+//	err := InitEmbeddingModels("", "", "/path/to/mom-embedding-ultra", true)
+func InitEmbeddingModels(qwen3ModelPath, gemmaModelPath, mmBertModelPath string, useCPU bool) error {
 	var cQwen3Path *C.char
 	var cGemmaPath *C.char
+	var cMmBertPath *C.char
 
 	// Convert paths to C strings (NULL if empty)
 	if qwen3ModelPath != "" {
@@ -722,24 +885,478 @@ func InitEmbeddingModels(qwen3ModelPath, gemmaModelPath string, useCPU bool) err
 		defer C.free(unsafe.Pointer(cGemmaPath))
 	}
 
-	success := C.init_embedding_models(
-		cQwen3Path,
-		cGemmaPath,
-		C.bool(useCPU),
-	)
+	if mmBertModelPath != "" {
+		cMmBertPath = C.CString(mmBertModelPath)
+		defer C.free(unsafe.Pointer(cMmBertPath))
+	}
+
+	// Choose appropriate FFI function based on whether mmBERT is provided
+	var success C.bool
+	if mmBertModelPath != "" {
+		// Use the mmBERT-aware initialization function
+		success = C.init_embedding_models_with_mmbert(
+			cQwen3Path,
+			cGemmaPath,
+			cMmBertPath,
+			C.bool(useCPU),
+		)
+	} else {
+		// Use the original initialization function (backward compatible)
+		success = C.init_embedding_models(
+			cQwen3Path,
+			cGemmaPath,
+			C.bool(useCPU),
+		)
+	}
 
 	if !bool(success) {
 		return fmt.Errorf("failed to initialize embedding models")
 	}
 
 	log.Printf("INFO: Embedding models initialized successfully")
-	if qwen3ModelPath != "" {
-		log.Printf("  - Qwen3: %s", qwen3ModelPath)
-	}
-	if gemmaModelPath != "" {
-		log.Printf("  - Gemma: %s", gemmaModelPath)
+
+	return nil
+}
+
+// InitMmBertEmbeddingModel initializes the mmBERT embedding model with 2D Matryoshka support.
+//
+// This model supports:
+//   - 32K context length (YaRN-scaled RoPE)
+//   - Multilingual (1800+ languages via Glot500)
+//   - 2D Matryoshka: dimension reduction (768→64) AND layer early exit (22→3 layers)
+//
+// After initialization, use GetEmbedding2DMatryoshka with modelType="mmbert" to generate embeddings.
+//
+// Parameters:
+//   - modelPath: Path to the mmBERT model directory
+//   - useCPU: If true, use CPU for inference; if false, use GPU if available
+//
+// Returns:
+//   - error: Non-nil if initialization fails
+//
+// Example:
+//
+//	err := InitMmBertEmbeddingModel("/path/to/mmbert-embed-32k-2d-matryoshka", false)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	// Generate embedding with early exit (3 layers, 256 dimensions)
+//	output, err := GetEmbedding2DMatryoshka("Hello world", "mmbert", 3, 256)
+func InitMmBertEmbeddingModel(modelPath string, useCPU bool) error {
+	if modelPath == "" {
+		return fmt.Errorf("modelPath cannot be empty")
 	}
 
+	cModelPath := C.CString(modelPath)
+	defer C.free(unsafe.Pointer(cModelPath))
+
+	success := C.init_mmbert_embedding_model(cModelPath, C.bool(useCPU))
+
+	if !bool(success) {
+		return fmt.Errorf("failed to initialize mmBERT embedding model")
+	}
+
+	log.Printf("INFO: mmBERT embedding model initialized with 2D Matryoshka support")
+	return nil
+}
+
+// MultiModalEmbeddingOutput represents the result of a multi-modal embedding.
+type MultiModalEmbeddingOutput struct {
+	Embedding        []float32 // The embedding vector (384-dim by default)
+	Modality         string    // "text", "image", or "audio"
+	ProcessingTimeMs float32   // Processing time in milliseconds
+}
+
+// InitMultiModalEmbeddingModel initializes the multi-modal embedding model.
+//
+// Model: llm-semantic-router/multi-modal-embed-small (~120M params)
+//   - Text: MiniLM-L6-v2 (22M params, 384-dim)
+//   - Image: SigLIP-base-patch16-512 (86M params, 768→384 projection)
+//   - Audio: Whisper-tiny encoder (8M params, 384-dim)
+//
+// After initialization, use MultiModalEncodeText, MultiModalEncodeImage,
+// or MultiModalEncodeAudio to generate embeddings.
+//
+// Parameters:
+//   - modelPath: Path to the multi-modal model directory
+//   - useCPU: If true, use CPU for inference; if false, use GPU if available
+//
+// Example:
+//
+//	err := InitMultiModalEmbeddingModel("/path/to/multi-modal-embed-small", false)
+//	if err != nil { log.Fatal(err) }
+//	output, err := MultiModalEncodeText("A photo of a cat", 0)
+func InitMultiModalEmbeddingModel(modelPath string, useCPU bool) error {
+	if modelPath == "" {
+		return fmt.Errorf("modelPath cannot be empty")
+	}
+
+	cModelPath := C.CString(modelPath)
+	defer C.free(unsafe.Pointer(cModelPath))
+
+	success := C.init_multimodal_embedding_model(cModelPath, C.bool(useCPU))
+
+	if !bool(success) {
+		return fmt.Errorf("failed to initialize multi-modal embedding model")
+	}
+
+	log.Printf("INFO: Multi-modal embedding model initialized (text+image+audio, 384-dim)")
+	return nil
+}
+
+// MultiModalEncodeText encodes text into a 384-dimensional embedding using the multi-modal model.
+//
+// Parameters:
+//   - text: Input text to encode
+//   - targetDim: Target embedding dimension (0 for default 384, or 32/64/128/256)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if encoding fails
+func MultiModalEncodeText(text string, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if text == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	var result C.MultiModalEmbeddingResult
+	status := C.multimodal_encode_text(cText, C.int(targetDim), &result)
+
+	if int(status) != 0 || bool(result.error) {
+		return nil, fmt.Errorf("multi-modal text encoding failed")
+	}
+
+	length := int(result.length)
+	if length <= 0 || result.data == nil {
+		return nil, fmt.Errorf("empty embedding returned")
+	}
+
+	embedding := make([]float32, length)
+	cSlice := unsafe.Slice((*float32)(unsafe.Pointer(result.data)), length)
+	copy(embedding, cSlice)
+	C.free_multimodal_embedding(result.data, result.length)
+
+	return &MultiModalEmbeddingOutput{
+		Embedding:        embedding,
+		Modality:         "text",
+		ProcessingTimeMs: float32(result.processing_time_ms),
+	}, nil
+}
+
+// MultiModalEncodeImage encodes image pixel data into a 384-dimensional embedding.
+//
+// Parameters:
+//   - pixelData: Raw pixel data as float32 slice (RGB, normalized 0-1), flattened [3*H*W]
+//   - height: Image height (512 for SigLIP-base-patch16-512)
+//   - width: Image width (512)
+//   - targetDim: Target dimension (0 for default 384)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if encoding fails
+func MultiModalEncodeImage(pixelData []float32, height, width, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if len(pixelData) == 0 {
+		return nil, fmt.Errorf("pixelData cannot be empty")
+	}
+	expected := 3 * height * width
+	if len(pixelData) != expected {
+		return nil, fmt.Errorf("pixelData length %d != expected %d (3*%d*%d)", len(pixelData), expected, height, width)
+	}
+
+	var result C.MultiModalEmbeddingResult
+	status := C.multimodal_encode_image(
+		(*C.float)(unsafe.Pointer(&pixelData[0])),
+		C.int(height),
+		C.int(width),
+		C.int(targetDim),
+		&result,
+	)
+
+	if int(status) != 0 || bool(result.error) {
+		return nil, fmt.Errorf("multi-modal image encoding failed")
+	}
+
+	length := int(result.length)
+	if length <= 0 || result.data == nil {
+		return nil, fmt.Errorf("empty embedding returned")
+	}
+
+	embedding := make([]float32, length)
+	cSlice := unsafe.Slice((*float32)(unsafe.Pointer(result.data)), length)
+	copy(embedding, cSlice)
+	C.free_multimodal_embedding(result.data, result.length)
+
+	return &MultiModalEmbeddingOutput{
+		Embedding:        embedding,
+		Modality:         "image",
+		ProcessingTimeMs: float32(result.processing_time_ms),
+	}, nil
+}
+
+// MultiModalEncodeAudio encodes a Mel spectrogram into a 384-dimensional embedding.
+//
+// Parameters:
+//   - melData: Mel spectrogram as float32 slice, flattened [nMels * timeFrames]
+//   - nMels: Number of Mel bins (typically 80)
+//   - timeFrames: Number of time frames
+//   - targetDim: Target dimension (0 for default 384)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if encoding fails
+func MultiModalEncodeAudio(melData []float32, nMels, timeFrames, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if len(melData) == 0 {
+		return nil, fmt.Errorf("melData cannot be empty")
+	}
+	expected := nMels * timeFrames
+	if len(melData) != expected {
+		return nil, fmt.Errorf("melData length %d != expected %d (%d*%d)", len(melData), expected, nMels, timeFrames)
+	}
+
+	var result C.MultiModalEmbeddingResult
+	status := C.multimodal_encode_audio(
+		(*C.float)(unsafe.Pointer(&melData[0])),
+		C.int(nMels),
+		C.int(timeFrames),
+		C.int(targetDim),
+		&result,
+	)
+
+	if int(status) != 0 || bool(result.error) {
+		return nil, fmt.Errorf("multi-modal audio encoding failed")
+	}
+
+	length := int(result.length)
+	if length <= 0 || result.data == nil {
+		return nil, fmt.Errorf("empty embedding returned")
+	}
+
+	embedding := make([]float32, length)
+	cSlice := unsafe.Slice((*float32)(unsafe.Pointer(result.data)), length)
+	copy(embedding, cSlice)
+	C.free_multimodal_embedding(result.data, result.length)
+
+	return &MultiModalEmbeddingOutput{
+		Embedding:        embedding,
+		Modality:         "audio",
+		ProcessingTimeMs: float32(result.processing_time_ms),
+	}, nil
+}
+
+// MultiModalEncodeImageFromBytes decodes JPEG/PNG image bytes, resizes to 512x512,
+// and encodes into an embedding using the multi-modal model.
+//
+// Parameters:
+//   - imageBytes: Raw JPEG or PNG image data
+//   - targetDim: Target embedding dimension (0 for default 384)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if decoding or encoding fails
+func MultiModalEncodeImageFromBytes(imageBytes []byte, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if len(imageBytes) == 0 {
+		return nil, fmt.Errorf("imageBytes cannot be empty")
+	}
+
+	pixelData, err := decodeAndResizeImage(imageBytes, 512, 512)
+	if err != nil {
+		return nil, fmt.Errorf("image decode/resize failed: %w", err)
+	}
+
+	return MultiModalEncodeImage(pixelData, 512, 512, targetDim)
+}
+
+// MultiModalEncodeImageFromBase64 decodes a base64-encoded image and encodes it
+// into an embedding. Handles both raw base64 and data-URI prefixed strings
+// (e.g. "data:image/jpeg;base64,...") as used by the OpenAI API.
+//
+// Parameters:
+//   - base64Str: Base64-encoded image (with or without data URI prefix)
+//   - targetDim: Target embedding dimension (0 for default 384)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if decoding or encoding fails
+func MultiModalEncodeImageFromBase64(base64Str string, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if base64Str == "" {
+		return nil, fmt.Errorf("base64Str cannot be empty")
+	}
+
+	payload := base64Str
+	if idx := strings.Index(base64Str, ";base64,"); idx >= 0 {
+		payload = base64Str[idx+len(";base64,"):]
+	}
+
+	imageBytes, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
+	}
+
+	return MultiModalEncodeImageFromBytes(imageBytes, targetDim)
+}
+
+// MultiModalEncodeImageFromURL downloads an image from a URL and encodes it
+// into an embedding using the multi-modal model.
+//
+// SECURITY: This function performs an outbound HTTP GET to the provided URL.
+// It must NOT be called with untrusted/user-supplied URLs (SSRF risk).
+// The router-side code restricts image inputs to inline data URIs via
+// isSafeImageDataURL; this helper is intended only for trusted, operator-
+// configured URLs (e.g. preloading image_candidates from config).
+//
+// Parameters:
+//   - url: HTTP(S) URL pointing to a JPEG or PNG image (trusted source only)
+//   - targetDim: Target embedding dimension (0 for default 384)
+//
+// Returns:
+//   - MultiModalEmbeddingOutput with the embedding and metadata
+//   - error if download, decoding, or encoding fails
+func MultiModalEncodeImageFromURL(url string, targetDim int) (*MultiModalEmbeddingOutput, error) {
+	if url == "" {
+		return nil, fmt.Errorf("url cannot be empty")
+	}
+
+	const (
+		maxImageSize = 20 * 1024 * 1024 // 20 MB
+		httpTimeout  = 30               // seconds
+	)
+
+	client := &http.Client{Timeout: time.Duration(httpTimeout) * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+	}
+
+	imageBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if len(imageBytes) > maxImageSize {
+		return nil, fmt.Errorf("image from %s exceeds maximum size of %d bytes", url, maxImageSize)
+	}
+
+	return MultiModalEncodeImageFromBytes(imageBytes, targetDim)
+}
+
+// decodeAndResizeImage decodes a JPEG/PNG image, resizes it to targetW x targetH
+// using bilinear interpolation, and returns CHW float32 pixel data in [0, 1].
+func decodeAndResizeImage(data []byte, targetW, targetH int) ([]float32, error) {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("image decode: %w", err)
+	}
+
+	bounds := img.Bounds()
+	srcW := bounds.Dx()
+	srcH := bounds.Dy()
+
+	pixels := make([]float32, 3*targetH*targetW)
+	xRatio := float64(srcW) / float64(targetW)
+	yRatio := float64(srcH) / float64(targetH)
+
+	for y := 0; y < targetH; y++ {
+		srcY := float64(y)*yRatio + float64(bounds.Min.Y)
+		y0 := int(math.Floor(srcY))
+		y1 := y0 + 1
+		fy := srcY - float64(y0)
+		if y1 >= bounds.Max.Y {
+			y1 = bounds.Max.Y - 1
+		}
+
+		for x := 0; x < targetW; x++ {
+			srcX := float64(x)*xRatio + float64(bounds.Min.X)
+			x0 := int(math.Floor(srcX))
+			x1 := x0 + 1
+			fx := srcX - float64(x0)
+			if x1 >= bounds.Max.X {
+				x1 = bounds.Max.X - 1
+			}
+
+			r00, g00, b00, _ := img.At(x0, y0).RGBA()
+			r10, g10, b10, _ := img.At(x1, y0).RGBA()
+			r01, g01, b01, _ := img.At(x0, y1).RGBA()
+			r11, g11, b11, _ := img.At(x1, y1).RGBA()
+
+			bilerp := func(v00, v10, v01, v11 uint32) float32 {
+				f00 := float64(v00) / 65535.0
+				f10 := float64(v10) / 65535.0
+				f01 := float64(v01) / 65535.0
+				f11 := float64(v11) / 65535.0
+				top := f00*(1-fx) + f10*fx
+				bot := f01*(1-fx) + f11*fx
+				return float32(top*(1-fy) + bot*fy)
+			}
+
+			idx := y*targetW + x
+			pixels[idx] = bilerp(r00, r10, r01, r11)
+			pixels[targetH*targetW+idx] = bilerp(g00, g10, g01, g11)
+			pixels[2*targetH*targetW+idx] = bilerp(b00, b10, b01, b11)
+		}
+	}
+
+	return pixels, nil
+}
+
+// InitEmbeddingModelsWithMmBert initializes all embedding models including mmBERT.
+//
+// This is a convenience function to initialize qwen3, gemma, and mmbert models together.
+// Pass empty string "" for any model you don't want to load.
+//
+// Parameters:
+//   - qwen3ModelPath: Path to Qwen3 model (or "" to skip)
+//   - gemmaModelPath: Path to Gemma model (or "" to skip)
+//   - mmBertModelPath: Path to mmBERT model (or "" to skip)
+//   - useCPU: If true, use CPU for inference
+//
+// Returns:
+//   - error: Non-nil if initialization fails
+//
+// Example:
+//
+//	// Load only mmBERT
+//	err := InitEmbeddingModelsWithMmBert("", "", "/path/to/mmbert", false)
+//
+//	// Load qwen3 and mmbert
+//	err := InitEmbeddingModelsWithMmBert("/path/to/qwen3", "", "/path/to/mmbert", false)
+func InitEmbeddingModelsWithMmBert(qwen3ModelPath, gemmaModelPath, mmBertModelPath string, useCPU bool) error {
+	var cQwen3Path *C.char
+	var cGemmaPath *C.char
+	var cMmBertPath *C.char
+
+	if qwen3ModelPath != "" {
+		cQwen3Path = C.CString(qwen3ModelPath)
+		defer C.free(unsafe.Pointer(cQwen3Path))
+	}
+
+	if gemmaModelPath != "" {
+		cGemmaPath = C.CString(gemmaModelPath)
+		defer C.free(unsafe.Pointer(cGemmaPath))
+	}
+
+	if mmBertModelPath != "" {
+		cMmBertPath = C.CString(mmBertModelPath)
+		defer C.free(unsafe.Pointer(cMmBertPath))
+	}
+
+	success := C.init_embedding_models_with_mmbert(
+		cQwen3Path,
+		cGemmaPath,
+		cMmBertPath,
+		C.bool(useCPU),
+	)
+
+	if !bool(success) {
+		return fmt.Errorf("failed to initialize embedding models with mmBERT")
+	}
+
+	log.Printf("INFO: Embedding models initialized (with mmBERT 2D Matryoshka support)")
 	return nil
 }
 
@@ -799,18 +1416,7 @@ func GetEmbeddingWithDim(text string, qualityPriority, latencyPriority float32, 
 		return nil, fmt.Errorf("embedding generation returned zero-length result")
 	}
 
-	embedding := make([]float32, length)
-
-	// Create a slice that refers to the C array
-	cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-
-	// Copy and convert each value
-	for i := 0; i < length; i++ {
-		embedding[i] = float32(cFloats[i])
-	}
-
-	// Free the memory allocated in Rust
-	C.free_embedding(result.data, result.length)
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
 	return embedding, nil
 }
@@ -868,18 +1474,7 @@ func GetEmbeddingWithMetadata(text string, qualityPriority, latencyPriority floa
 		return nil, fmt.Errorf("embedding generation returned zero-length result")
 	}
 
-	embedding := make([]float32, length)
-
-	// Create a slice that refers to the C array
-	cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-
-	// Copy and convert each value
-	for i := 0; i < length; i++ {
-		embedding[i] = float32(cFloats[i])
-	}
-
-	// Free the memory allocated in Rust
-	C.free_embedding(result.data, result.length)
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
 	// Convert model_type to string
 	var modelType string
@@ -923,9 +1518,40 @@ func GetEmbeddingWithMetadata(text string, qualityPriority, latencyPriority floa
 //	}
 //	fmt.Printf("Used model: %s\n", output.ModelType)
 func GetEmbeddingWithModelType(text string, modelType string, targetDim int) (*EmbeddingOutput, error) {
-	// Validate model type (only accept "qwen3" or "gemma")
-	if modelType != "qwen3" && modelType != "gemma" {
-		return nil, fmt.Errorf("invalid model type: %s (must be 'qwen3' or 'gemma')", modelType)
+	// Validate model type
+	if modelType != "qwen3" && modelType != "gemma" && modelType != "mmbert" && modelType != "multimodal" {
+		return nil, fmt.Errorf("invalid model type: %s (must be 'qwen3', 'gemma', 'mmbert', or 'multimodal')", modelType)
+	}
+
+	// For mmbert, delegate to 2D Matryoshka function with default layer (full model)
+	return GetEmbedding2DMatryoshka(text, modelType, 0, targetDim)
+}
+
+// GetEmbedding2DMatryoshka generates embeddings with 2D Matryoshka support.
+//
+// This function supports the full 2D Matryoshka API for mmBERT models:
+//   - Layer early exit: Use fewer layers (3, 6, 11, or 22) for faster inference
+//   - Dimension truncation: Use smaller dimensions (64, 128, 256, 512, 768)
+//
+// For qwen3 and gemma models, only dimension truncation is supported (targetLayer is ignored).
+//
+// Parameters:
+//   - text: Input text to generate embedding for
+//   - modelType: "qwen3", "gemma", or "mmbert"
+//   - targetLayer: Target layer for early exit (0 for full model, mmbert: 3/6/11/22)
+//   - targetDim: Target embedding dimension (0 for default)
+//
+// Returns:
+//   - EmbeddingOutput containing the embedding vector and metadata
+//   - error if embedding generation fails
+//
+// Example for mmbert with early exit (3 layers, 256 dimensions):
+//
+//	output, err := GetEmbedding2DMatryoshka("Hello world", "mmbert", 3, 256)
+func GetEmbedding2DMatryoshka(text string, modelType string, targetLayer int, targetDim int) (*EmbeddingOutput, error) {
+	// Validate model type
+	if modelType != "qwen3" && modelType != "gemma" && modelType != "mmbert" && modelType != "multimodal" {
+		return nil, fmt.Errorf("invalid model type: %s (must be 'qwen3', 'gemma', 'mmbert', or 'multimodal')", modelType)
 	}
 
 	cText := C.CString(text)
@@ -935,9 +1561,10 @@ func GetEmbeddingWithModelType(text string, modelType string, targetDim int) (*E
 	defer C.free(unsafe.Pointer(cModelType))
 
 	var result C.EmbeddingResult
-	status := C.get_embedding_with_model_type(
+	status := C.get_embedding_2d_matryoshka(
 		cText,
 		cModelType,
+		C.int(targetLayer),
 		C.int(targetDim),
 		&result,
 	)
@@ -958,26 +1585,19 @@ func GetEmbeddingWithModelType(text string, modelType string, targetDim int) (*E
 		return nil, fmt.Errorf("embedding generation returned zero-length result")
 	}
 
-	embedding := make([]float32, length)
+	embedding := cFloatArrayToGoSlice(result.data, result.length)
 
-	// Create a slice that refers to the C array
-	cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
-
-	// Copy and convert each value
-	for i := 0; i < length; i++ {
-		embedding[i] = float32(cFloats[i])
-	}
-
-	// Free the memory allocated in Rust
-	C.free_embedding(result.data, result.length)
-
-	// Convert model_type to string
+	// Convert model_type to string (0=qwen3, 1=gemma, 2=mmbert, 3=multimodal)
 	var actualModelType string
 	switch int(result.model_type) {
 	case 0:
 		actualModelType = "qwen3"
 	case 1:
 		actualModelType = "gemma"
+	case 2:
+		actualModelType = "mmbert"
+	case 3:
+		actualModelType = "multimodal"
 	default:
 		actualModelType = "unknown"
 	}
@@ -1017,6 +1637,28 @@ type SimilarityOutput struct {
 	Similarity       float32 // Cosine similarity score (-1.0 to 1.0)
 	ModelType        string  // Model used: "qwen3", "gemma", or "unknown"
 	ProcessingTimeMs float32 // Processing time in milliseconds
+}
+
+// cFloatArrayToGoSlice converts a C array of floats to a Go slice and frees the C memory
+func cFloatArrayToGoSlice(data *C.float, length C.int) []float32 {
+	if data == nil || length == 0 {
+		return nil
+	}
+
+	l := int(length)
+	out := make([]float32, l)
+
+	// Create a slice that refers to the C array
+	cArray := (*[1 << 30]C.float)(unsafe.Pointer(data))[:l:l]
+
+	// Copy and convert each value
+	for i := 0; i < l; i++ {
+		out[i] = float32(cArray[i])
+	}
+
+	// Free the memory allocated in Rust
+	C.free_embedding(data, length)
+	return out
 }
 
 // CalculateEmbeddingSimilarity calculates cosine similarity between two texts using embedding models
@@ -1381,7 +2023,7 @@ func InitJailbreakClassifier(modelPath string, numClasses int, useCPU bool) erro
 	jailbreakClassifierInitOnce.Do(func() {
 		if modelPath == "" {
 			// Default to the jailbreak classification model if path is empty
-			modelPath = "./models/jailbreak_classifier_modernbert-base_model"
+			modelPath = "./models/mom-jailbreak-classifier"
 		}
 
 		if numClasses < 2 {
@@ -1476,6 +2118,63 @@ func ClassifyJailbreakText(text string) (ClassResult, error) {
 
 	if result.class < 0 {
 		return ClassResult{}, fmt.Errorf("failed to classify jailbreak text")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitQwen3PreferenceClassifier initializes the Qwen3 preference classifier model
+func InitQwen3PreferenceClassifier(modelPath string, useCPU bool) error {
+	var err error
+	qwenPreferenceInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to Qwen3 preference classifier model if path is empty
+			modelPath = "./models/mom-preference-classifier"
+		}
+
+		log.Printf("Initializing Qwen3 preference classifier model: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_qwen3_preference_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize Qwen3 preference classifier model")
+		}
+	})
+
+	if err != nil {
+		qwenPreferenceInitOnce = sync.Once{}
+	}
+
+	return err
+}
+
+// ClassifyQwen3Preference classifies a conversation using Qwen3 preference model
+// labels must match the preference_rules order (label names only)
+func ClassifyQwen3Preference(text string, labels []string) (ClassResult, error) {
+	if len(labels) == 0 {
+		return ClassResult{}, fmt.Errorf("labels cannot be empty")
+	}
+
+	labelsJSON, err := json.Marshal(labels)
+	if err != nil {
+		return ClassResult{}, fmt.Errorf("failed to marshal labels: %w", err)
+	}
+
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	cLabels := C.CString(string(labelsJSON))
+	defer C.free(unsafe.Pointer(cLabels))
+
+	result := C.classify_qwen3_preference(cText, cLabels)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("qwen3 preference classification failed")
 	}
 
 	return ClassResult{
@@ -1579,6 +2278,802 @@ func InitModernBertPIITokenClassifier(modelPath string, useCPU bool) error {
 	})
 	return err
 }
+
+// ============================================================================
+// mmBERT (Multilingual ModernBERT) Functions
+// ============================================================================
+
+var (
+	mmBertClassifierInitOnce      sync.Once
+	mmBertTokenClassifierInitOnce sync.Once
+)
+
+// InitMmBertClassifier initializes the mmBERT (multilingual ModernBERT) classifier
+// mmBERT supports 1800+ languages with 256k vocabulary and 8192 max sequence length.
+// Reference: https://huggingface.co/jhu-clsp/mmBERT-base
+func InitMmBertClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBertClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "jhu-clsp/mmBERT-base"
+		}
+
+		log.Printf("🌐 Initializing mmBERT (multilingual) classifier: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT classifier model")
+		} else {
+			log.Printf("   mmBERT classifier initialized successfully")
+		}
+	})
+	return err
+}
+
+// InitMmBertClassifierAuto initializes a ModernBERT classifier with auto-detection
+// This function auto-detects whether a model is mmBERT (multilingual) or standard ModernBERT
+// based on the model's config.json (vocab_size >= 200000 and position_embedding_type == "sans_pos")
+func InitMmBertClassifierAuto(modelPath string, useCPU bool) error {
+	var err error
+	mmBertClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "jhu-clsp/mmBERT-base"
+		}
+
+		log.Printf("🔍 Auto-detecting ModernBERT variant: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_classifier_auto(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize classifier model with auto-detection")
+		} else {
+			log.Printf("   Classifier initialized successfully (variant auto-detected)")
+		}
+	})
+	return err
+}
+
+// InitMmBertTokenClassifier initializes the mmBERT token classifier for multilingual NER
+func InitMmBertTokenClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBertTokenClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "jhu-clsp/mmBERT-base"
+		}
+
+		log.Printf("🌐 Initializing mmBERT (multilingual) token classifier: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_token_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT token classifier model")
+		} else {
+			log.Printf("   mmBERT token classifier initialized successfully")
+		}
+	})
+	return err
+}
+
+// IsMmBertModel checks if a model is mmBERT (multilingual) based on its config.json
+// Returns true if the model has vocab_size >= 200000 and uses sans_pos position embeddings.
+func IsMmBertModel(configPath string) bool {
+	cConfigPath := C.CString(configPath)
+	defer C.free(unsafe.Pointer(cConfigPath))
+
+	return bool(C.is_mmbert_model(cConfigPath))
+}
+
+// ============================================================================
+// mmBERT-32K (32K Context, YaRN RoPE Scaling) Functions
+// Reference: https://huggingface.co/llm-semantic-router/mmbert-32k-yarn
+// ============================================================================
+
+var (
+	mmBert32KIntentClassifierInitOnce    sync.Once
+	mmBert32KFactcheckClassifierInitOnce sync.Once
+	mmBert32KJailbreakClassifierInitOnce sync.Once
+	mmBert32KFeedbackClassifierInitOnce  sync.Once
+	mmBert32KPIIClassifierInitOnce       sync.Once
+	mmBert32KModalityClassifierInitOnce  sync.Once
+)
+
+// IsMmBert32KModel checks if a model is mmBERT-32K (YaRN scaled) based on its config.json
+// Returns true if the model has max_position_embeddings >= 16384 or rope_theta >= 100000
+func IsMmBert32KModel(configPath string) bool {
+	cConfigPath := C.CString(configPath)
+	defer C.free(unsafe.Pointer(cConfigPath))
+
+	return bool(C.is_mmbert_32k_model(cConfigPath))
+}
+
+// InitMmBert32KIntentClassifier initializes the mmBERT-32K intent classifier
+// This model classifies text into MMLU-Pro academic categories for request routing.
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-intent-classifier-lora
+func InitMmBert32KIntentClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBert32KIntentClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "./models/mmbert32k-intent-classifier-lora"
+		}
+
+		log.Printf("🎯 Initializing mmBERT-32K intent classifier: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_intent_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K intent classifier")
+		} else {
+			log.Printf("   mmBERT-32K intent classifier initialized (32K context)")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KIntent classifies text using mmBERT-32K intent classifier
+// Returns the predicted category and confidence
+func ClassifyMmBert32KIntent(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_intent(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify intent with mmBERT-32K")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitMmBert32KFactcheckClassifier initializes the mmBERT-32K fact-check classifier
+// This model determines if text needs fact-checking.
+// Outputs: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-factcheck-classifier-lora
+func InitMmBert32KFactcheckClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBert32KFactcheckClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "./models/mmbert32k-factcheck-classifier-lora"
+		}
+
+		log.Printf("Initializing mmBERT-32K fact-check classifier: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_factcheck_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K fact-check classifier")
+		} else {
+			log.Printf("   mmBERT-32K fact-check classifier initialized")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KFactcheck classifies text using mmBERT-32K fact-check classifier
+// Returns: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
+func ClassifyMmBert32KFactcheck(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_factcheck(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify fact-check with mmBERT-32K")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitMmBert32KJailbreakClassifier initializes the mmBERT-32K jailbreak detector
+// This model detects prompt injection/jailbreak attempts.
+// Outputs: 0=benign, 1=jailbreak
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-jailbreak-detector-lora
+func InitMmBert32KJailbreakClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBert32KJailbreakClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "./models/mmbert32k-jailbreak-detector-lora"
+		}
+
+		log.Printf("Initializing mmBERT-32K jailbreak detector: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_jailbreak_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K jailbreak detector")
+		} else {
+			log.Printf("   mmBERT-32K jailbreak detector initialized")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KJailbreak classifies text using mmBERT-32K jailbreak detector
+// Returns: 0=benign, 1=jailbreak
+func ClassifyMmBert32KJailbreak(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_jailbreak(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify jailbreak with mmBERT-32K")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitMmBert32KFeedbackClassifier initializes the mmBERT-32K feedback detector
+// This model detects user satisfaction from follow-up messages.
+// Outputs: 0=SAT, 1=NEED_CLARIFICATION, 2=WRONG_ANSWER, 3=WANT_DIFFERENT
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-feedback-detector-lora
+func InitMmBert32KFeedbackClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBert32KFeedbackClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "./models/mmbert32k-feedback-detector-lora"
+		}
+
+		log.Printf("📊 Initializing mmBERT-32K feedback detector: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_feedback_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K feedback detector")
+		} else {
+			log.Printf("   mmBERT-32K feedback detector initialized")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KFeedback classifies text using mmBERT-32K feedback detector
+// Returns: 0=SAT, 1=NEED_CLARIFICATION, 2=WRONG_ANSWER, 3=WANT_DIFFERENT
+func ClassifyMmBert32KFeedback(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_feedback(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify feedback with mmBERT-32K")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitMmBert32KPIIClassifier initializes the mmBERT-32K PII detector
+// This model detects 17 types of PII entities using BIO tagging.
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-pii-detector-lora
+func InitMmBert32KPIIClassifier(modelPath string, useCPU bool) error {
+	var err error
+	mmBert32KPIIClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			modelPath = "./models/mmbert32k-pii-detector-lora"
+		}
+
+		log.Printf("Initializing mmBERT-32K PII detector: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_pii_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K PII detector")
+		} else {
+			log.Printf("   mmBERT-32K PII detector initialized")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KPII detects PII entities in text using mmBERT-32K
+// Returns a list of detected PII entities with their types and positions.
+// Entity types are returned as "LABEL_{class_id}" and translated by the Go-side PIIMapping.
+func ClassifyMmBert32KPII(text string) ([]TokenEntity, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_pii_tokens(cText)
+	defer C.free_modernbert_token_result(C.ModernBertTokenClassificationResult{
+		entities:     (*C.ModernBertTokenEntity)(unsafe.Pointer(result.entities)),
+		num_entities: result.num_entities,
+	})
+
+	if result.num_entities == 0 {
+		return []TokenEntity{}, nil
+	}
+
+	entities := make([]TokenEntity, result.num_entities)
+	entityPtr := result.entities
+	for i := 0; i < int(result.num_entities); i++ {
+		entity := (*C.ModernBertTokenEntity)(unsafe.Pointer(uintptr(unsafe.Pointer(entityPtr)) + uintptr(i)*unsafe.Sizeof(*entityPtr)))
+		entities[i] = TokenEntity{
+			EntityType: C.GoString(entity.entity_type),
+			Start:      int(entity.start),
+			End:        int(entity.end),
+			Text:       C.GoString(entity.text),
+			Confidence: float32(entity.confidence),
+		}
+	}
+
+	return entities, nil
+}
+
+// ModalityResult represents the output of modality routing classification
+type ModalityResult struct {
+	Modality   string  // "AR", "DIFFUSION", or "BOTH"
+	ClassID    int     // 0=AR, 1=DIFFUSION, 2=BOTH
+	Confidence float32 // Confidence score (0.0-1.0)
+}
+
+// InitMmBert32KModalityClassifier initializes the mmBERT-32K modality routing classifier
+// This model classifies user prompt intent into response modality:
+// - AR (0): Text-only response via autoregressive LLM
+// - DIFFUSION (1): Image generation via diffusion model
+// - BOTH (2): Hybrid response requiring both text and image
+// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-modality-router-merged
+func InitMmBert32KModalityClassifier(modelPath string, useCPU bool) error {
+	if modelPath == "" {
+		return fmt.Errorf("modality classifier model_path is required (set classifier.model_path in modality_detection config)")
+	}
+	var err error
+	mmBert32KModalityClassifierInitOnce.Do(func() {
+		log.Printf("🎯 Initializing mmBERT-32K modality routing classifier: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_mmbert_32k_modality_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize mmBERT-32K modality routing classifier")
+		} else {
+			log.Printf("   mmBERT-32K modality router initialized (AR/DIFFUSION/BOTH)")
+		}
+	})
+	return err
+}
+
+// ClassifyMmBert32KModality classifies user prompt intent into response modality
+// Returns ModalityResult with modality label ("AR", "DIFFUSION", "BOTH") and confidence
+func ClassifyMmBert32KModality(text string) (ModalityResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_mmbert_32k_modality(cText)
+
+	if result.class < 0 {
+		return ModalityResult{}, fmt.Errorf("failed to classify modality with mmBERT-32K")
+	}
+
+	// Map class ID to modality label
+	modalityLabels := map[int]string{
+		0: "AR",
+		1: "DIFFUSION",
+		2: "BOTH",
+	}
+
+	classID := int(result.class)
+	modality, ok := modalityLabels[classID]
+	if !ok {
+		return ModalityResult{}, fmt.Errorf("mmBERT-32K modality classifier returned unknown class_id %d (expected 0=AR, 1=DIFFUSION, 2=BOTH)", classID)
+	}
+
+	return ModalityResult{
+		Modality:   modality,
+		ClassID:    classID,
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitFactCheckClassifier initializes the halugate-sentinel fact-check classifier
+// This model determines whether a prompt needs external fact verification.
+// Model outputs: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
+func InitFactCheckClassifier(modelPath string, useCPU bool) error {
+	var err error
+	factCheckClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to halugate-sentinel model path
+			modelPath = "./models/mom-halugate-sentinel"
+		}
+
+		log.Printf("Initializing fact-check classifier (halugate-sentinel): %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_fact_check_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize fact-check classifier model")
+		} else {
+			log.Printf("Fact-check classifier initialized successfully")
+		}
+	})
+	return err
+}
+
+// ClassifyFactCheckText classifies the provided text for fact-checking needs
+// Returns the predicted class (0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED) and confidence
+func ClassifyFactCheckText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_fact_check_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify text for fact-checking")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// InitFeedbackDetector initializes the feedback detector classifier
+// This model determines user satisfaction from follow-up messages.
+// Model outputs: 0=SAT, 1=NEED_CLARIFICATION, 2=WRONG_ANSWER, 3=WANT_DIFFERENT
+func InitFeedbackDetector(modelPath string, useCPU bool) error {
+	var err error
+	feedbackDetectorInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to feedback-detector model path
+			modelPath = "./models/feedback-detector"
+		}
+
+		log.Printf("Initializing feedback detector: %s", modelPath)
+
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_feedback_detector(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize feedback detector model")
+		} else {
+			log.Printf("Feedback detector initialized successfully")
+		}
+	})
+	return err
+}
+
+// ClassifyFeedbackText classifies the provided text to determine user feedback type
+// Returns: 0=SAT (satisfied), 1=NEED_CLARIFICATION, 2=WRONG_ANSWER, 3=WANT_DIFFERENT
+func ClassifyFeedbackText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_feedback_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify feedback text")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// ================================================================================================
+// HALLUCINATION DETECTION GO BINDINGS (Token-level Detection + NLI)
+// ================================================================================================
+
+// NLILabel represents the NLI classification result
+type NLILabel int
+
+const (
+	// NLIEntailment means the premise supports the hypothesis
+	NLIEntailment NLILabel = 0
+	// NLINeutral means the premise neither supports nor contradicts
+	NLINeutral NLILabel = 1
+	// NLIContradiction means the premise contradicts the hypothesis
+	NLIContradiction NLILabel = 2
+	// NLIError means an error occurred during classification
+	NLIError NLILabel = -1
+)
+
+// String returns the string representation of NLILabel
+func (l NLILabel) String() string {
+	switch l {
+	case NLIEntailment:
+		return "ENTAILMENT"
+	case NLINeutral:
+		return "NEUTRAL"
+	case NLIContradiction:
+		return "CONTRADICTION"
+	default:
+		return "ERROR"
+	}
+}
+
+// HallucinationSpan represents a detected hallucinated span
+type HallucinationSpan struct {
+	Text       string  `json:"text"`
+	Start      int     `json:"start"`
+	End        int     `json:"end"`
+	Confidence float32 `json:"confidence"`
+	Label      string  `json:"label"`
+}
+
+// HallucinationDetectionResult represents the result from hallucination detection
+type HallucinationDetectionResult struct {
+	HasHallucination bool                `json:"has_hallucination"`
+	Confidence       float32             `json:"confidence"`
+	Spans            []HallucinationSpan `json:"spans,omitempty"`
+}
+
+// NLIClassificationResult represents the result of NLI classification
+type NLIClassificationResult struct {
+	Label          NLILabel `json:"label"`
+	LabelStr       string   `json:"label_str"`
+	Confidence     float32  `json:"confidence"`
+	EntailmentProb float32  `json:"entailment_prob"`
+	NeutralProb    float32  `json:"neutral_prob"`
+	ContradictProb float32  `json:"contradiction_prob"`
+}
+
+// EnhancedHallucinationSpan represents a hallucinated span with NLI explanation
+type EnhancedHallucinationSpan struct {
+	Text                    string   `json:"text"`
+	Start                   int      `json:"start"`
+	End                     int      `json:"end"`
+	HallucinationConfidence float32  `json:"hallucination_confidence"`
+	NLILabel                NLILabel `json:"nli_label"`
+	NLILabelStr             string   `json:"nli_label_str"`
+	NLIConfidence           float32  `json:"nli_confidence"`
+	Severity                int      `json:"severity"` // 0-4: 0=low, 4=critical
+	Explanation             string   `json:"explanation"`
+}
+
+// EnhancedHallucinationDetectionResult represents hallucination detection with NLI explanations
+type EnhancedHallucinationDetectionResult struct {
+	HasHallucination bool                        `json:"has_hallucination"`
+	Confidence       float32                     `json:"confidence"`
+	Spans            []EnhancedHallucinationSpan `json:"spans,omitempty"`
+}
+
+var (
+	hallucinationDetectInitOnce sync.Once
+	hallucinationDetectInitErr  error
+	nliModelInitOnce            sync.Once
+	nliModelInitErr             error
+)
+
+// InitHallucinationModel initializes the hallucination detection model
+func InitHallucinationModel(modelPath string, useCPU bool) error {
+	var err error
+	hallucinationDetectInitOnce.Do(func() {
+		if modelPath == "" {
+			err = fmt.Errorf("model path is required for hallucination detection")
+			return
+		}
+
+		log.Printf("Initializing hallucination detection model: %s", modelPath)
+
+		cModelPath := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelPath))
+
+		success := C.init_hallucination_model(cModelPath, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize hallucination detection model")
+		}
+	})
+
+	if err != nil {
+		hallucinationDetectInitOnce = sync.Once{}
+	}
+
+	hallucinationDetectInitErr = err
+	return err
+}
+
+// InitNLIModel initializes the NLI model for enhanced hallucination detection
+func InitNLIModel(modelPath string, useCPU bool) error {
+	var err error
+	nliModelInitOnce.Do(func() {
+		if modelPath == "" {
+			err = fmt.Errorf("model path is required for NLI model")
+			return
+		}
+
+		log.Printf("Initializing NLI model: %s", modelPath)
+
+		cModelPath := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelPath))
+
+		success := C.init_nli_model(cModelPath, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize NLI model")
+		}
+	})
+
+	if err != nil {
+		nliModelInitOnce = sync.Once{}
+	}
+
+	nliModelInitErr = err
+	return err
+}
+
+// IsNLIModelInitialized checks if the NLI model is initialized
+func IsNLIModelInitialized() bool {
+	return bool(C.is_nli_model_initialized())
+}
+
+// DetectHallucinations detects hallucinations in an answer given context
+// threshold: confidence threshold for hallucination detection (0.0-1.0)
+// Only tokens with confidence >= threshold are considered hallucinated
+func DetectHallucinations(context, question, answer string, threshold float32) (*HallucinationDetectionResult, error) {
+	if hallucinationDetectInitErr != nil {
+		return nil, fmt.Errorf("hallucination detection model not initialized: %v", hallucinationDetectInitErr)
+	}
+
+	cContext := C.CString(context)
+	cQuestion := C.CString(question)
+	cAnswer := C.CString(answer)
+	defer C.free(unsafe.Pointer(cContext))
+	defer C.free(unsafe.Pointer(cQuestion))
+	defer C.free(unsafe.Pointer(cAnswer))
+
+	result := C.detect_hallucinations(cContext, cQuestion, cAnswer, C.float(threshold))
+	defer C.free_hallucination_detection_result(result)
+
+	if bool(result.error) {
+		errMsg := "unknown error"
+		if result.error_message != nil {
+			errMsg = C.GoString(result.error_message)
+		}
+		return nil, fmt.Errorf("hallucination detection error: %s", errMsg)
+	}
+
+	// Convert C result to Go
+	goResult := &HallucinationDetectionResult{
+		HasHallucination: bool(result.has_hallucination),
+		Confidence:       float32(result.confidence),
+		Spans:            []HallucinationSpan{},
+	}
+
+	if result.num_spans > 0 && result.spans != nil {
+		spans := (*[1 << 20]C.HallucinationSpan)(unsafe.Pointer(result.spans))[:result.num_spans:result.num_spans]
+		for _, span := range spans {
+			goSpan := HallucinationSpan{
+				Start:      int(span.start),
+				End:        int(span.end),
+				Confidence: float32(span.confidence),
+			}
+			if span.text != nil {
+				goSpan.Text = C.GoString(span.text)
+			}
+			if span.label != nil {
+				goSpan.Label = C.GoString(span.label)
+			}
+			goResult.Spans = append(goResult.Spans, goSpan)
+		}
+	}
+
+	return goResult, nil
+}
+
+// ClassifyNLI classifies the relationship between premise and hypothesis
+func ClassifyNLI(premise, hypothesis string) (*NLIClassificationResult, error) {
+	if nliModelInitErr != nil {
+		return nil, fmt.Errorf("NLI model not initialized: %v", nliModelInitErr)
+	}
+
+	cPremise := C.CString(premise)
+	cHypothesis := C.CString(hypothesis)
+	defer C.free(unsafe.Pointer(cPremise))
+	defer C.free(unsafe.Pointer(cHypothesis))
+
+	result := C.classify_nli(cPremise, cHypothesis)
+	defer C.free_nli_result(result)
+
+	if bool(result.error) {
+		errMsg := "unknown error"
+		if result.error_message != nil {
+			errMsg = C.GoString(result.error_message)
+		}
+		return nil, fmt.Errorf("NLI classification error: %s", errMsg)
+	}
+
+	label := NLILabel(result.label)
+	return &NLIClassificationResult{
+		Label:          label,
+		LabelStr:       label.String(),
+		Confidence:     float32(result.confidence),
+		EntailmentProb: float32(result.entailment_prob),
+		NeutralProb:    float32(result.neutral_prob),
+		ContradictProb: float32(result.contradiction_prob),
+	}, nil
+}
+
+// DetectHallucinationsWithNLI detects hallucinations with NLI-based explanations
+// threshold: confidence threshold for hallucination detection (0.0-1.0)
+// Only tokens with confidence >= threshold are considered hallucinated
+func DetectHallucinationsWithNLI(context, question, answer string, threshold float32) (*EnhancedHallucinationDetectionResult, error) {
+	if hallucinationDetectInitErr != nil {
+		return nil, fmt.Errorf("hallucination detection model not initialized: %v", hallucinationDetectInitErr)
+	}
+
+	cContext := C.CString(context)
+	cQuestion := C.CString(question)
+	cAnswer := C.CString(answer)
+	defer C.free(unsafe.Pointer(cContext))
+	defer C.free(unsafe.Pointer(cQuestion))
+	defer C.free(unsafe.Pointer(cAnswer))
+
+	result := C.detect_hallucinations_with_nli(cContext, cQuestion, cAnswer, C.float(threshold))
+	defer C.free_enhanced_hallucination_detection_result(result)
+
+	if bool(result.error) {
+		errMsg := "unknown error"
+		if result.error_message != nil {
+			errMsg = C.GoString(result.error_message)
+		}
+		return nil, fmt.Errorf("enhanced hallucination detection error: %s", errMsg)
+	}
+
+	// Convert C result to Go
+	goResult := &EnhancedHallucinationDetectionResult{
+		HasHallucination: bool(result.has_hallucination),
+		Confidence:       float32(result.confidence),
+		Spans:            []EnhancedHallucinationSpan{},
+	}
+
+	if result.num_spans > 0 && result.spans != nil {
+		spans := (*[1 << 20]C.EnhancedHallucinationSpan)(unsafe.Pointer(result.spans))[:result.num_spans:result.num_spans]
+		for _, span := range spans {
+			goSpan := EnhancedHallucinationSpan{
+				Start:                   int(span.start),
+				End:                     int(span.end),
+				HallucinationConfidence: float32(span.hallucination_confidence),
+				NLILabel:                NLILabel(span.nli_label),
+				NLIConfidence:           float32(span.nli_confidence),
+				Severity:                int(span.severity),
+			}
+			goSpan.NLILabelStr = goSpan.NLILabel.String()
+			if span.text != nil {
+				goSpan.Text = C.GoString(span.text)
+			}
+			if span.explanation != nil {
+				goSpan.Explanation = C.GoString(span.explanation)
+			}
+			goResult.Spans = append(goResult.Spans, goSpan)
+		}
+	}
+
+	return goResult, nil
+}
+
+// ================================================================================================
+// END OF HALLUCINATION DETECTION GO BINDINGS
+// ================================================================================================
 
 // ClassifyModernBertText classifies the provided text using ModernBERT and returns the predicted class and confidence
 func ClassifyModernBertText(text string) (ClassResult, error) {
@@ -2161,7 +3656,7 @@ func InitQwen3MultiLoRAClassifier(baseModelPath string) error {
 		return fmt.Errorf("failed to initialize Qwen3 Multi-LoRA classifier (error code: %d)", result)
 	}
 
-	log.Printf("✅ Qwen3 Multi-LoRA classifier initialized from: %s", baseModelPath)
+	log.Printf("Qwen3 Multi-LoRA classifier initialized from: %s", baseModelPath)
 	return nil
 }
 
@@ -2178,7 +3673,7 @@ func LoadQwen3LoRAAdapter(adapterName, adapterPath string) error {
 		return fmt.Errorf("failed to load adapter '%s' (error code: %d)", adapterName, result)
 	}
 
-	log.Printf("✅ Loaded adapter '%s' from: %s", adapterName, adapterPath)
+	log.Printf("Loaded adapter '%s' from: %s", adapterName, adapterPath)
 	return nil
 }
 
@@ -2351,7 +3846,7 @@ func InitQwen3Guard(modelPath string) error {
 		return fmt.Errorf("failed to initialize Qwen3Guard (error code: %d)", result)
 	}
 
-	log.Printf("✅ Qwen3Guard initialized from: %s", modelPath)
+	log.Printf("Qwen3Guard initialized from: %s", modelPath)
 	return nil
 }
 
@@ -2551,4 +4046,174 @@ func extractLabelAndCategories(content string) (string, []string) {
 
 // ================================================================================================
 // END OF LORA UNIFIED CLASSIFIER GO BINDINGS
+// ================================================================================================
+
+// ================================================================================================
+// MLP SELECTOR FOR MODEL SELECTION (GPU-ACCELERATED)
+// Reference: FusionFactory (arXiv:2507.10540) - Query-level fusion via tailored LLM routers
+// ================================================================================================
+
+// MLPDeviceType defines the device type for MLP inference
+type MLPDeviceType int
+
+const (
+	// MLPDeviceCPU uses CPU for inference
+	MLPDeviceCPU MLPDeviceType = 0
+	// MLPDeviceCUDA uses NVIDIA GPU for inference
+	MLPDeviceCUDA MLPDeviceType = 1
+	// MLPDeviceMetal uses Apple Silicon GPU for inference
+	MLPDeviceMetal MLPDeviceType = 2
+)
+
+// MLPDType defines the data type for mixed precision inference
+type MLPDType int
+
+const (
+	// MLPF32 uses full precision (32-bit float) - default, best accuracy
+	MLPF32 MLPDType = 0
+	// MLPF16 uses half precision (16-bit float) - faster on GPUs with tensor cores
+	MLPF16 MLPDType = 1
+	// MLPBF16 uses BFloat16 - good balance of dynamic range and speed
+	MLPBF16 MLPDType = 2
+)
+
+// MLPSelector wraps the Candle MLP implementation for GPU-accelerated inference
+type MLPSelector struct {
+	handle unsafe.Pointer
+	mu     sync.RWMutex
+}
+
+// NewMLPSelector creates a new MLP selector (CPU)
+func NewMLPSelector() *MLPSelector {
+	handle := C.candle_mlp_new()
+	if handle == nil {
+		return nil
+	}
+	return &MLPSelector{handle: handle}
+}
+
+// NewMLPSelectorWithDevice creates a new MLP selector with specified device
+func NewMLPSelectorWithDevice(deviceType MLPDeviceType) *MLPSelector {
+	handle := C.candle_mlp_new_with_device(C.int(deviceType))
+	if handle == nil {
+		return nil
+	}
+	return &MLPSelector{handle: handle}
+}
+
+// NewMLPSelectorWithDeviceAndDType creates a new MLP selector with device and dtype for mixed precision
+func NewMLPSelectorWithDeviceAndDType(deviceType MLPDeviceType, dtype MLPDType) *MLPSelector {
+	handle := C.candle_mlp_new_with_device_and_dtype(C.int(deviceType), C.int(dtype))
+	if handle == nil {
+		return nil
+	}
+	return &MLPSelector{handle: handle}
+}
+
+// Close releases the MLP selector resources
+func (s *MLPSelector) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle != nil {
+		C.candle_mlp_free(s.handle)
+		s.handle = nil
+	}
+}
+
+// Select selects the best model for a query embedding
+func (s *MLPSelector) Select(query []float64) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.handle == nil {
+		return "", fmt.Errorf("MLP selector not initialized")
+	}
+
+	if len(query) == 0 {
+		return "", fmt.Errorf("empty query embedding")
+	}
+
+	cQuery := make([]C.double, len(query))
+	for i, v := range query {
+		cQuery[i] = C.double(v)
+	}
+
+	result := C.candle_mlp_select(s.handle, &cQuery[0], C.size_t(len(query)))
+	if result == nil {
+		return "", fmt.Errorf("MLP selection failed")
+	}
+	defer C.candle_mlp_free_string(result)
+
+	return C.GoString(result), nil
+}
+
+// IsTrained returns whether the model has been loaded
+func (s *MLPSelector) IsTrained() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.handle == nil {
+		return false
+	}
+	return C.candle_mlp_is_trained(s.handle) != 0
+}
+
+// ToJSON serializes the model to JSON
+func (s *MLPSelector) ToJSON() (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.handle == nil {
+		return "", fmt.Errorf("MLP selector not initialized")
+	}
+
+	result := C.candle_mlp_to_json(s.handle)
+	if result == nil {
+		return "", fmt.Errorf("JSON serialization failed")
+	}
+	defer C.candle_mlp_free_string(result)
+
+	return C.GoString(result), nil
+}
+
+// MLPFromJSON loads an MLP selector from JSON (the primary way to load trained models)
+func MLPFromJSON(jsonStr string) (*MLPSelector, error) {
+	cJSON := C.CString(jsonStr)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	handle := C.candle_mlp_from_json(cJSON)
+	if handle == nil {
+		return nil, fmt.Errorf("failed to load MLP from JSON")
+	}
+
+	return &MLPSelector{handle: handle}, nil
+}
+
+// MLPFromJSONWithDevice loads an MLP selector from JSON with specific device
+func MLPFromJSONWithDevice(jsonStr string, deviceType MLPDeviceType) (*MLPSelector, error) {
+	cJSON := C.CString(jsonStr)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	handle := C.candle_mlp_from_json_with_device(cJSON, C.int(deviceType))
+	if handle == nil {
+		return nil, fmt.Errorf("failed to load MLP from JSON with device")
+	}
+
+	return &MLPSelector{handle: handle}, nil
+}
+
+// MLPFromJSONWithDeviceAndDType loads an MLP selector from JSON with device and dtype for mixed precision
+func MLPFromJSONWithDeviceAndDType(jsonStr string, deviceType MLPDeviceType, dtype MLPDType) (*MLPSelector, error) {
+	cJSON := C.CString(jsonStr)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	handle := C.candle_mlp_from_json_with_device_and_dtype(cJSON, C.int(deviceType), C.int(dtype))
+	if handle == nil {
+		return nil, fmt.Errorf("failed to load MLP from JSON with device and dtype")
+	}
+
+	return &MLPSelector{handle: handle}, nil
+}
+
+// ================================================================================================
+// END OF MLP SELECTOR GO BINDINGS
 // ================================================================================================

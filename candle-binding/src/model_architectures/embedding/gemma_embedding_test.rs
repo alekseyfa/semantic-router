@@ -148,7 +148,7 @@ fn load_reference_outputs() -> Vec<ReferenceOutput> {
             panic!("Failed to generate reference data");
         }
 
-        eprintln!("✅ Reference data generated successfully");
+        eprintln!("Reference data generated successfully");
     }
 
     let json_content =
@@ -203,7 +203,7 @@ fn create_test_config() -> GemmaEmbeddingConfig {
 #[rstest]
 #[serial(gemma_model)]
 fn test_config_load_from_pretrained() {
-    let model_path = "../models/embeddinggemma-300m";
+    let model_path = "../models/mom-embedding-flash";
 
     let config = GemmaEmbeddingConfig::from_pretrained(model_path).expect("Failed to load config");
 

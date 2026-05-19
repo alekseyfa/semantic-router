@@ -18,8 +18,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"gopkg.in/yaml.v3"
 
 	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
 )
 
@@ -99,7 +101,7 @@ var _ = Describe("Cache Package", func() {
 				})
 			})
 
-			Context("with Milvus backend", func() {
+			Context("(Deprecated) with file base Milvus backend", func() {
 				var milvusConfigPath string
 
 				BeforeEach(func() {
@@ -144,7 +146,7 @@ development:
 					Expect(err).NotTo(HaveOccurred())
 				})
 
-				It("should create Milvus cache backend successfully with valid config", func() {
+				It("should create Milvus cache backend successfully with valid config (Deprecated)", func() {
 					config := CacheConfig{
 						BackendType:         MilvusCacheType,
 						Enabled:             true,
@@ -172,7 +174,7 @@ development:
 					}
 				})
 
-				It("should handle disabled Milvus cache", func() {
+				It("should handle disabled Milvus cache (Deprecated)", func() {
 					config := CacheConfig{
 						BackendType:         MilvusCacheType,
 						Enabled:             false,
@@ -186,6 +188,235 @@ development:
 					Expect(err).NotTo(HaveOccurred())
 					Expect(backend).NotTo(BeNil())
 					Expect(backend.IsEnabled()).To(BeFalse())
+				})
+			})
+
+			Context("with inline Milvus configuration", func() {
+				var milvusConfig *config.MilvusConfig
+				BeforeEach(func() {
+					// Skip Milvus tests if environment variable is set
+					if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+						Skip("Milvus tests skipped due to SKIP_MILVUS_TESTS=true")
+					}
+
+					yamlConfig := `
+connection:
+  host: "localhost"
+  port: 19530
+  database: "test_cache"
+  timeout: 30
+collection:
+  name: "test_semantic_cache"
+  description: "Test semantic cache collection"
+  vector_field:
+    name: "embedding"
+    dimension: 512
+    metric_type: "IP"
+  index:
+    type: "HNSW"
+    params:
+      M: 16
+      efConstruction: 64
+search:
+  params:
+    ef: 64
+  topk: 10
+  consistency_level: "Session"
+development:
+  auto_create_collection: true
+  verbose_errors: true
+`
+					err := yaml.Unmarshal([]byte(yamlConfig), &milvusConfig)
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should create Milvus cache backend successfully with valid config", func() {
+					config := CacheConfig{
+						BackendType:         MilvusCacheType,
+						Enabled:             true,
+						SimilarityThreshold: 0.85,
+						TTLSeconds:          7200,
+						Milvus:              milvusConfig,
+						EmbeddingModel:      "bert",
+					}
+
+					backend, err := NewCacheBackend(config)
+
+					// Skip test if Milvus is not reachable
+					if err != nil {
+						if strings.Contains(err.Error(), "failed to create Milvus client") ||
+							strings.Contains(err.Error(), "connection") ||
+							strings.Contains(err.Error(), "dial") {
+							Skip("Milvus server not available: " + err.Error())
+						}
+						// For other errors, fail the test
+						Expect(err).NotTo(HaveOccurred())
+					} else {
+						// If Milvus is available, creation should succeed
+						Expect(backend).NotTo(BeNil())
+						Expect(backend.IsEnabled()).To(BeTrue())
+					}
+				})
+			})
+
+			Context("(Deprecated) with Redis backend", func() {
+				var redisConfigPath string
+
+				BeforeEach(func() {
+					if os.Getenv("SKIP_REDIS_TESTS") == "true" {
+						Skip("Redis tests skipped due to SKIP_REDIS_TESTS=true")
+					}
+
+					redisConfigPath = filepath.Join(tempDir, "redis.yaml")
+					redisConfig := `
+connection:
+  host: "localhost"
+  port: 6379
+  database: 0
+  timeout: 30
+
+index:
+  name: "test_semantic_cache"
+  prefix: "doc:"
+  vector_field:
+    name: "embedding"
+    dimension: 384
+    metric_type: "COSINE"
+  index_type: "HNSW"
+  params:
+    M: 16
+    efConstruction: 64
+
+search:
+  topk: 1
+
+logging:
+  enable_query_log: false
+  enable_metrics: false
+
+development:
+  drop_index_on_startup: true
+  auto_create_index: true
+  verbose_errors: true
+`
+					err := os.WriteFile(redisConfigPath, []byte(redisConfig), 0o644)
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should create Redis cache backend successfully with valid config (Deprecated)", func() {
+					config := CacheConfig{
+						BackendType:         RedisCacheType,
+						Enabled:             true,
+						SimilarityThreshold: 0.8,
+						TTLSeconds:          3600,
+						BackendConfigPath:   redisConfigPath,
+						EmbeddingModel:      "bert",
+					}
+
+					backend, err := NewCacheBackend(config)
+
+					if err != nil {
+						if strings.Contains(err.Error(), "failed to connect to Redis") ||
+							strings.Contains(err.Error(), "connection refused") ||
+							strings.Contains(err.Error(), "failed to initialize index") {
+							Skip("Redis server not available: " + err.Error())
+						}
+						Expect(err).NotTo(HaveOccurred())
+					} else {
+						Expect(backend).NotTo(BeNil())
+						Expect(backend.IsEnabled()).To(BeTrue())
+						Expect(backend.Close()).To(Succeed())
+					}
+				})
+
+				It("should handle disabled Redis cache (Deprecated)", func() {
+					config := CacheConfig{
+						BackendType:         RedisCacheType,
+						Enabled:             false,
+						SimilarityThreshold: 0.8,
+						TTLSeconds:          3600,
+						BackendConfigPath:   redisConfigPath,
+						EmbeddingModel:      "bert",
+					}
+
+					backend, err := NewCacheBackend(config)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(backend).NotTo(BeNil())
+					Expect(backend.IsEnabled()).To(BeFalse())
+					Expect(backend.Close()).To(Succeed())
+				})
+			})
+
+			Context("with inline Redis configuration", func() {
+				var redisConfig *config.RedisConfig
+
+				BeforeEach(func() {
+					if os.Getenv("SKIP_REDIS_TESTS") == "true" {
+						Skip("Redis tests skipped due to SKIP_REDIS_TESTS=true")
+					}
+
+					yamlConfig := `
+connection:
+    host: "localhost"
+    port: 6379
+    database: 0
+    password: ""
+    timeout: 30
+    tls:
+      enabled: false
+      cert_file: ""
+      key_file: ""
+      ca_file: ""
+index:
+  name: "semantic_cache_idx"
+  prefix: "doc:"
+  vector_field:
+    name: "embedding"
+    dimension: 384
+    metric_type: "COSINE"
+  index_type: "HNSW"
+  params:
+    M: 16
+    efConstruction: 64
+search:
+  topk: 1
+logging:
+  level: "info"
+  enable_query_log: false
+  enable_metrics: true
+development:
+  drop_index_on_startup: true
+  auto_create_index: true
+  verbose_errors: true
+`
+					err := yaml.Unmarshal([]byte(yamlConfig), &redisConfig)
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should create Redis cache backend successfully with valid config", func() {
+					config := CacheConfig{
+						BackendType:         RedisCacheType,
+						Enabled:             true,
+						SimilarityThreshold: 0.8,
+						TTLSeconds:          3600,
+						Redis:               redisConfig,
+						EmbeddingModel:      "bert",
+					}
+
+					backend, err := NewCacheBackend(config)
+
+					if err != nil {
+						if strings.Contains(err.Error(), "failed to connect to Redis") ||
+							strings.Contains(err.Error(), "connection refused") ||
+							strings.Contains(err.Error(), "failed to initialize index") {
+							Skip("Redis server not available: " + err.Error())
+						}
+						Expect(err).NotTo(HaveOccurred())
+					} else {
+						Expect(backend).NotTo(BeNil())
+						Expect(backend.IsEnabled()).To(BeTrue())
+						Expect(backend.Close()).To(Succeed())
+					}
 				})
 			})
 
@@ -575,7 +806,7 @@ development:
 		})
 
 		It("should handle AddEntry operation with embeddings", func() {
-			err := inMemoryCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"))
+			err := inMemoryCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			stats := inMemoryCache.GetStats()
@@ -584,7 +815,7 @@ development:
 
 		It("should handle FindSimilar operation with embeddings", func() {
 			// First add an entry
-			err := inMemoryCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"))
+			err := inMemoryCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Search for similar query
@@ -593,19 +824,20 @@ development:
 			Expect(found).To(BeTrue()) // Should find exact match
 			Expect(response).To(Equal([]byte("response")))
 
-			// Search for different model (should not match)
+			// Search for different model - should match due to cross-model cache sharing
+			// (model filtering removed to improve cache hit rates)
 			response, found, err = inMemoryCache.FindSimilar("different-model", "test query")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeFalse()) // Should not match different model
-			Expect(response).To(BeNil())
+			Expect(found).To(BeTrue())
+			Expect(response).To(Equal([]byte("response")))
 		})
 
 		It("should handle AddPendingRequest and UpdateWithResponse", func() {
-			err := inMemoryCache.AddPendingRequest("test-request-id", "test-model", "test query", []byte("request"))
+			err := inMemoryCache.AddPendingRequest("test-request-id", "test-model", "test query", []byte("request"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Update with response
-			err = inMemoryCache.UpdateWithResponse("test-request-id", []byte("response"))
+			err = inMemoryCache.UpdateWithResponse("test-request-id", []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Should now be able to find it
@@ -628,14 +860,14 @@ development:
 				EmbeddingModel:      "bert",
 			})
 
-			err := inMemoryCache.AddPendingRequest("expired-request-id", "test-model", "stale query", []byte("request"))
+			err := inMemoryCache.AddPendingRequest("expired-request-id", "test-model", "stale query", []byte("request"), -1)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(testutil.ToFloat64(metrics.CacheEntriesTotal.WithLabelValues("memory"))).To(Equal(float64(1)))
 
 			// Wait for TTL to expire before triggering the update path
 			time.Sleep(2 * time.Second)
 
-			err = inMemoryCache.UpdateWithResponse("expired-request-id", []byte("response"))
+			err = inMemoryCache.UpdateWithResponse("expired-request-id", []byte("response"), -1)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no pending request"))
 
@@ -654,7 +886,7 @@ development:
 			highThresholdCache := NewInMemoryCache(highThresholdOptions)
 			defer highThresholdCache.Close()
 
-			err := highThresholdCache.AddEntry("test-request-id", "test-model", "machine learning", []byte("request"), []byte("ml response"))
+			err := highThresholdCache.AddEntry("test-request-id", "test-model", "machine learning", []byte("request"), []byte("ml response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Exact match should work
@@ -672,7 +904,7 @@ development:
 
 		It("should track hit and miss statistics", func() {
 			// Add an entry with a specific query
-			err := inMemoryCache.AddEntry("test-request-id", "test-model", "What is machine learning?", []byte("request"), []byte("ML is a subset of AI"))
+			err := inMemoryCache.AddEntry("test-request-id", "test-model", "What is machine learning?", []byte("request"), []byte("ML is a subset of AI"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Search for the exact cached query (should be a hit)
@@ -704,7 +936,7 @@ development:
 			})
 			defer ttlCache.Close()
 
-			err := ttlCache.AddEntry("ttl-request-id", "ttl-model", "time-sensitive query", []byte("request"), []byte("response"))
+			err := ttlCache.AddEntry("ttl-request-id", "ttl-model", "time-sensitive query", []byte("request"), []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			time.Sleep(1100 * time.Millisecond)
@@ -720,7 +952,7 @@ development:
 		})
 
 		It("should handle error when updating non-existent pending request", func() {
-			err := inMemoryCache.UpdateWithResponse("non-existent-query", []byte("response"))
+			err := inMemoryCache.UpdateWithResponse("non-existent-query", []byte("response"), -1)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no pending request found"))
 		})
@@ -747,13 +979,13 @@ development:
 
 			// Disabled cache operations should not error but should be no-ops
 			// They should NOT try to generate embeddings
-			err := disabledCache.AddPendingRequest("test-request-id", "test-model", "test query", []byte("request"))
+			err := disabledCache.AddPendingRequest("test-request-id", "test-model", "test query", []byte("request"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = disabledCache.UpdateWithResponse("test-request-id", []byte("response"))
+			err = disabledCache.UpdateWithResponse("test-request-id", []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = disabledCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"))
+			err = disabledCache.AddEntry("test-request-id", "test-model", "test query", []byte("request"), []byte("response"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			response, found, err := disabledCache.FindSimilar("model", "query")
@@ -783,10 +1015,10 @@ development:
 			})
 			defer cacheWithHNSW.Close()
 
-			err := cacheWithHNSW.AddEntry("req-1", "test-model", "first query text", []byte("request-1"), []byte("response-1"))
+			err := cacheWithHNSW.AddEntry("req-1", "test-model", "first query text", []byte("request-1"), []byte("response-1"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = cacheWithHNSW.AddEntry("req-2", "test-model", "second query text", []byte("request-2"), []byte("response-2"))
+			err = cacheWithHNSW.AddEntry("req-2", "test-model", "second query text", []byte("request-2"), []byte("response-2"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Sanity check: the second entry should be retrievable before any eviction occurs.
@@ -796,7 +1028,7 @@ development:
 			Expect(resp).To(Equal([]byte("response-2")))
 
 			// Adding a third entry triggers eviction (max entries = 2).
-			err = cacheWithHNSW.AddEntry("req-3", "test-model", "third query text", []byte("request-3"), []byte("response-3"))
+			err = cacheWithHNSW.AddEntry("req-3", "test-model", "third query text", []byte("request-3"), []byte("response-3"), -1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Entry 2 should still be searchable even after eviction reshuffles the slice.
@@ -1069,7 +1301,7 @@ func BenchmarkComprehensive(b *testing.B) {
 				// Populate cache
 				for i, query := range testQueries {
 					reqID := fmt.Sprintf("req%d", i)
-					_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+					_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 				}
 
 				searchQuery := generateQuery(contentLen, cacheSize/2)
@@ -1109,7 +1341,7 @@ func BenchmarkComprehensive(b *testing.B) {
 					// Populate cache
 					for i, query := range testQueries {
 						reqID := fmt.Sprintf("req%d", i)
-						_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+						_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 					}
 
 					searchQuery := generateQuery(contentLen, cacheSize/2)
@@ -1172,7 +1404,7 @@ func BenchmarkIndexConstruction(b *testing.B) {
 					// Build index by adding entries
 					for j, query := range testQueries {
 						reqID := fmt.Sprintf("req%d", j)
-						_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+						_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 					}
 				}
 			})
@@ -1263,6 +1495,224 @@ func TestLFUPolicyTiebreaker(t *testing.T) {
 	}
 }
 
+// TestFIFOPolicyOptimized tests the O(1) FIFO policy operations
+func TestFIFOPolicyOptimized(t *testing.T) {
+	policy := NewFIFOPolicy()
+	entries := []CacheEntry{
+		{RequestID: "req-0"},
+		{RequestID: "req-1"},
+		{RequestID: "req-2"},
+	}
+
+	// Test OnInsert and SelectVictim
+	for i, e := range entries {
+		policy.OnInsert(i, e.RequestID)
+	}
+
+	victim := policy.SelectVictim(entries)
+	if victim != 0 {
+		t.Errorf("Expected victim 0 (oldest), got %d", victim)
+	}
+
+	// Test Evict
+	evicted := policy.Evict()
+	if evicted != 0 {
+		t.Errorf("Expected evicted index 0, got %d", evicted)
+	}
+
+	// Test UpdateIndex (simulating swap after eviction)
+	policy.UpdateIndex("req-2", 2, 0)
+	victim = policy.SelectVictim(entries)
+	if victim != 1 {
+		t.Errorf("Expected victim 1 after swap, got %d", victim)
+	}
+
+	// Test OnRemove
+	policy.OnRemove(1, "req-1")
+	victim = policy.SelectVictim(entries)
+	if victim != 0 {
+		t.Errorf("Expected victim 0 (req-2 moved), got %d", victim)
+	}
+}
+
+// TestLRUPolicyOptimized tests the O(1) LRU policy operations
+func TestLRUPolicyOptimized(t *testing.T) {
+	policy := NewLRUPolicy()
+	entries := []CacheEntry{
+		{RequestID: "req-0"},
+		{RequestID: "req-1"},
+		{RequestID: "req-2"},
+	}
+
+	// Insert all entries
+	for i, e := range entries {
+		policy.OnInsert(i, e.RequestID)
+	}
+
+	// LRU order: req-2 (MRU) -> req-1 -> req-0 (LRU)
+	victim := policy.SelectVictim(entries)
+	if victim != 0 {
+		t.Errorf("Expected victim 0 (LRU), got %d", victim)
+	}
+
+	// Access req-0 to make it MRU
+	policy.OnAccess(0, "req-0")
+	victim = policy.SelectVictim(entries)
+	if victim != 1 {
+		t.Errorf("Expected victim 1 after accessing req-0, got %d", victim)
+	}
+
+	// Test Evict
+	evicted := policy.Evict()
+	if evicted != 1 {
+		t.Errorf("Expected evicted index 1, got %d", evicted)
+	}
+
+	// Test UpdateIndex
+	policy.UpdateIndex("req-2", 2, 1)
+
+	// Test OnRemove
+	policy.OnRemove(1, "req-2")
+
+	// Only req-0 should remain
+	victim = policy.SelectVictim(entries)
+	if victim != 0 {
+		t.Errorf("Expected victim 0, got %d", victim)
+	}
+}
+
+// TestLFUPolicyOptimized tests the O(1) LFU policy operations
+func TestLFUPolicyOptimized(t *testing.T) {
+	policy := NewLFUPolicy()
+	entries := []CacheEntry{
+		{RequestID: "req-0"},
+		{RequestID: "req-1"},
+		{RequestID: "req-2"},
+	}
+
+	// Insert all entries (all start with freq=1)
+	for i, e := range entries {
+		policy.OnInsert(i, e.RequestID)
+	}
+
+	// Access req-2 multiple times to increase frequency
+	for i := 0; i < 5; i++ {
+		policy.OnAccess(2, "req-2")
+	}
+
+	// req-0 and req-1 have freq=1, req-2 has freq=6
+	victim := policy.SelectVictim(entries)
+	if victim != 0 && victim != 1 {
+		t.Errorf("Expected victim 0 or 1 (lowest freq), got %d", victim)
+	}
+
+	// Test Evict
+	evicted := policy.Evict()
+	if evicted != 0 && evicted != 1 {
+		t.Errorf("Expected evicted 0 or 1, got %d", evicted)
+	}
+
+	// Test UpdateIndex
+	policy.UpdateIndex("req-2", 2, 0)
+
+	// Test OnRemove
+	policy.OnRemove(1, "req-1")
+}
+
+// TestExpirationHeapOperations tests all ExpirationHeap operations
+func TestExpirationHeapOperations(t *testing.T) {
+	now := time.Now()
+	heap := NewExpirationHeap()
+
+	// Test Add
+	heap.Add("req-0", 0, now.Add(1*time.Hour))
+	heap.Add("req-1", 1, now.Add(30*time.Minute))
+	heap.Add("req-2", 2, now.Add(2*time.Hour))
+
+	// Test Size
+	if heap.Size() != 3 {
+		t.Errorf("Expected size 3, got %d", heap.Size())
+	}
+
+	// Test PeekNext (should be req-1, earliest expiration)
+	reqID, idx, expiresAt, ok := heap.PeekNext()
+	if !ok || reqID != "req-1" || idx != 1 {
+		t.Errorf("Expected PeekNext to return req-1, got %s (idx=%d, ok=%v)", reqID, idx, ok)
+	}
+	_ = expiresAt
+
+	// Test UpdateExpiration (move req-1 to later)
+	heap.UpdateExpiration("req-1", now.Add(3*time.Hour))
+
+	// Now req-0 should be earliest
+	reqID, _, _, ok = heap.PeekNext()
+	if !ok || reqID != "req-0" {
+		t.Errorf("Expected PeekNext to return req-0 after update, got %s", reqID)
+	}
+
+	// Test UpdateIndex
+	heap.UpdateIndex("req-0", 5)
+
+	// Test Remove
+	heap.Remove("req-0")
+	if heap.Size() != 2 {
+		t.Errorf("Expected size 2 after remove, got %d", heap.Size())
+	}
+
+	// Test PopExpired
+	heap.Add("req-expired", 10, now.Add(-1*time.Hour)) // Already expired
+	expired := heap.PopExpired(now)
+	if len(expired) != 1 || expired[0] != "req-expired" {
+		t.Errorf("Expected 1 expired entry, got %v", expired)
+	}
+}
+
+// TestInMemoryCacheEviction tests cache eviction with O(1) policies
+func TestInMemoryCacheEviction(t *testing.T) {
+	cache := NewInMemoryCache(InMemoryCacheOptions{
+		Enabled:             true,
+		MaxEntries:          3,
+		TTLSeconds:          3600,
+		SimilarityThreshold: 0.9,
+		EvictionPolicy:      LRUEvictionPolicyType,
+	})
+
+	// Add entries up to max
+	for i := 0; i < 3; i++ {
+		embedding := make([]float32, 384)
+		embedding[i] = 1.0
+		cache.mu.Lock()
+		cache.entries = append(cache.entries, CacheEntry{
+			RequestID: fmt.Sprintf("req-%d", i),
+			Query:     fmt.Sprintf("query %d", i),
+			Embedding: embedding,
+		})
+		idx := len(cache.entries) - 1
+		cache.entryMap[fmt.Sprintf("req-%d", i)] = idx
+		cache.registerEntryWithEvictionPolicy(idx, fmt.Sprintf("req-%d", i))
+		cache.mu.Unlock()
+	}
+
+	// Verify we have 3 entries
+	stats := cache.GetStats()
+	if stats.TotalEntries != 3 {
+		t.Errorf("Expected 3 entries, got %d", stats.TotalEntries)
+	}
+
+	// Add one more to trigger eviction
+	cache.mu.Lock()
+	cache.evictOne()
+	cache.mu.Unlock()
+
+	// Should have 2 entries now
+	cache.mu.RLock()
+	count := len(cache.entries)
+	cache.mu.RUnlock()
+	if count != 2 {
+		t.Errorf("Expected 2 entries after eviction, got %d", count)
+	}
+}
+
 // TestHybridCacheDisabled tests that disabled hybrid cache returns immediately
 func TestHybridCacheDisabled(t *testing.T) {
 	cache, err := NewHybridCache(HybridCacheOptions{
@@ -1278,7 +1728,7 @@ func TestHybridCacheDisabled(t *testing.T) {
 	}
 
 	// All operations should be no-ops
-	err = cache.AddEntry("req1", "model1", "test query", []byte("request"), []byte("response"))
+	err = cache.AddEntry("req1", "model1", "test query", []byte("request"), []byte("response"), -1)
 	if err != nil {
 		t.Errorf("AddEntry should not error on disabled cache: %v", err)
 	}
@@ -1294,6 +1744,11 @@ func TestHybridCacheDisabled(t *testing.T) {
 
 // TestHybridCacheBasicOperations tests basic cache operations
 func TestHybridCacheBasicOperations(t *testing.T) {
+	// Skip if Milvus tests are disabled
+	if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+		t.Skip("Skipping Milvus-dependent test (SKIP_MILVUS_TESTS=true)")
+	}
+
 	t.Log("Starting TestHybridCacheBasicOperations - this may take 30-60 seconds...")
 
 	// Create a test Milvus config
@@ -1325,7 +1780,7 @@ func TestHybridCacheBasicOperations(t *testing.T) {
 	testQuery := "What is the meaning of life?"
 	testResponse := []byte(`{"response": "42"}`)
 
-	err = cache.AddEntry("req1", "gpt-4", testQuery, []byte("{}"), testResponse)
+	err = cache.AddEntry("req1", "gpt-4", testQuery, []byte("{}"), testResponse, -1)
 	if err != nil {
 		t.Fatalf("Failed to add entry: %v", err)
 	}
@@ -1381,6 +1836,11 @@ func TestHybridCacheBasicOperations(t *testing.T) {
 
 // TestHybridCachePendingRequest tests pending request flow
 func TestHybridCachePendingRequest(t *testing.T) {
+	// Skip if Milvus tests are disabled
+	if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+		t.Skip("Skipping Milvus-dependent test (SKIP_MILVUS_TESTS=true)")
+	}
+
 	t.Log("Starting TestHybridCachePendingRequest - this may take 30-60 seconds...")
 
 	milvusConfig, cleanup, err := createTestMilvusConfig("test_hybrid_pending", 64, true)
@@ -1403,14 +1863,14 @@ func TestHybridCachePendingRequest(t *testing.T) {
 
 	// Add pending request
 	testQuery := "Explain quantum computing"
-	err = cache.AddPendingRequest("req1", "gpt-4", testQuery, []byte("{}"))
+	err = cache.AddPendingRequest("req1", "gpt-4", testQuery, []byte("{}"), -1)
 	if err != nil {
 		t.Fatalf("Failed to add pending request: %v", err)
 	}
 
 	// Update with response
 	testResponse := []byte(`{"answer": "Quantum computing uses qubits..."}`)
-	err = cache.UpdateWithResponse("req1", testResponse)
+	err = cache.UpdateWithResponse("req1", testResponse, -1)
 	if err != nil {
 		t.Fatalf("Failed to update with response: %v", err)
 	}
@@ -1433,6 +1893,11 @@ func TestHybridCachePendingRequest(t *testing.T) {
 
 // TestHybridCacheEviction tests memory eviction behavior
 func TestHybridCacheEviction(t *testing.T) {
+	// Skip if Milvus tests are disabled
+	if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+		t.Skip("Skipping Milvus-dependent test (SKIP_MILVUS_TESTS=true)")
+	}
+
 	t.Log("Starting TestHybridCacheEviction - this may take 30-60 seconds...")
 
 	milvusConfig, cleanup, err := createTestMilvusConfig("test_hybrid_eviction", 64, true)
@@ -1458,7 +1923,7 @@ func TestHybridCacheEviction(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		query := fmt.Sprintf("Query number %d", i)
 		response := []byte(fmt.Sprintf(`{"answer": "Response %d"}`, i))
-		err = cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response)
+		err = cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response, -1)
 		if err != nil {
 			t.Fatalf("Failed to add entry %d: %v", i, err)
 		}
@@ -1493,6 +1958,11 @@ func TestHybridCacheEviction(t *testing.T) {
 
 // TestHybridCacheLocalCacheHit tests local cache hot path
 func TestHybridCacheLocalCacheHit(t *testing.T) {
+	// Skip if Milvus tests are disabled
+	if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+		t.Skip("Skipping Milvus-dependent test (SKIP_MILVUS_TESTS=true)")
+	}
+
 	t.Log("Starting TestHybridCacheLocalCacheHit - this may take 30-60 seconds...")
 
 	milvusConfig, cleanup, err := createTestMilvusConfig("test_hybrid_local", 64, true)
@@ -1516,7 +1986,7 @@ func TestHybridCacheLocalCacheHit(t *testing.T) {
 	// Add an entry
 	testQuery := "What is machine learning?"
 	testResponse := []byte(`{"answer": "ML is..."}`)
-	err = cache.AddEntry("req1", "gpt-4", testQuery, []byte("{}"), testResponse)
+	err = cache.AddEntry("req1", "gpt-4", testQuery, []byte("{}"), testResponse, -1)
 	if err != nil {
 		t.Fatalf("Failed to add entry: %v", err)
 	}
@@ -1686,7 +2156,7 @@ milvus:
 	for i := 0; i < b.N; i++ {
 		query := fmt.Sprintf("Benchmark query number %d", i)
 		response := []byte(fmt.Sprintf(`{"answer": "Response %d"}`, i))
-		err := cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response)
+		err := cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response, -1)
 		if err != nil {
 			b.Fatalf("AddEntry failed: %v", err)
 		}
@@ -1730,7 +2200,7 @@ milvus:
 	for i := 0; i < 100; i++ {
 		query := fmt.Sprintf("Benchmark query number %d", i)
 		response := []byte(fmt.Sprintf(`{"answer": "Response %d"}`, i))
-		err := cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response)
+		err := cache.AddEntry(fmt.Sprintf("req%d", i), "gpt-4", query, []byte("{}"), response, -1)
 		if err != nil {
 			b.Fatalf("AddEntry failed: %v", err)
 		}
@@ -2034,7 +2504,7 @@ func BenchmarkHybridVsMilvus(b *testing.B) {
 				}
 
 				populateTime := time.Since(populateStart)
-				b.Logf("✓ Populated in %v (%.0f entries/sec)", populateTime, float64(cacheSize)/populateTime.Seconds())
+				b.Logf("Populated in %v (%.0f entries/sec)", populateTime, float64(cacheSize)/populateTime.Seconds())
 
 				// Wait for Milvus to be ready
 				time.Sleep(2 * time.Second)
@@ -2194,7 +2664,7 @@ func BenchmarkHybridVsMilvus(b *testing.B) {
 				}
 
 				populateTime := time.Since(populateStart)
-				b.Logf("✓ Populated in %v (%.0f entries/sec)", populateTime, float64(cacheSize)/populateTime.Seconds())
+				b.Logf("Populated in %v (%.0f entries/sec)", populateTime, float64(cacheSize)/populateTime.Seconds())
 
 				// Wait for Milvus to be ready
 				time.Sleep(2 * time.Second)
@@ -2354,9 +2824,9 @@ func BenchmarkComponentLatency(b *testing.B) {
 
 		b.Logf("Building HNSW index with %d entries...", cacheSize)
 		for i := 0; i < cacheSize; i++ {
-			_ = cache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"))
+			_ = cache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"), -1)
 		}
-		b.Logf("✓ HNSW index built")
+		b.Logf("HNSW index built")
 
 		query := testQueries[0]
 
@@ -2388,10 +2858,10 @@ func BenchmarkComponentLatency(b *testing.B) {
 
 		b.Logf("Populating Milvus with %d entries...", cacheSize)
 		for i := 0; i < cacheSize; i++ {
-			_ = milvusCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"))
+			_ = milvusCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"), -1)
 		}
 		time.Sleep(2 * time.Second)
-		b.Logf("✓ Milvus populated")
+		b.Logf("Milvus populated")
 
 		query := testQueries[0]
 
@@ -2446,7 +2916,7 @@ func BenchmarkThroughputUnderLoad(b *testing.B) {
 
 			// Populate
 			for i := 0; i < cacheSize; i++ {
-				_ = milvusCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"))
+				_ = milvusCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"), -1)
 			}
 			time.Sleep(2 * time.Second)
 
@@ -2488,7 +2958,7 @@ func BenchmarkThroughputUnderLoad(b *testing.B) {
 
 			// Populate
 			for i := 0; i < cacheSize; i++ {
-				_ = hybridCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"))
+				_ = hybridCache.AddEntry(fmt.Sprintf("req-%d", i), "model", testQueries[i], []byte("req"), []byte("resp"), -1)
 			}
 			time.Sleep(2 * time.Second)
 
@@ -2562,6 +3032,11 @@ func writeBenchmarkResultToCSV(file *os.File, result TestBenchmarkResult) {
 
 // TestHybridVsMilvusSmoke is a quick smoke test to verify both caches work
 func TestHybridVsMilvusSmoke(t *testing.T) {
+	// Skip if Milvus tests are disabled
+	if os.Getenv("SKIP_MILVUS_TESTS") == "true" {
+		t.Skip("Skipping Milvus-dependent test (SKIP_MILVUS_TESTS=true)")
+	}
+
 	t.Log("Starting TestHybridVsMilvusSmoke - this may take 2-3 minutes...")
 
 	// Create test Milvus config
@@ -2594,7 +3069,7 @@ func TestHybridVsMilvusSmoke(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		// Add entry
-		err = cache.AddEntry("req-1", "model", "What is machine learning?", []byte("req"), []byte("ML is..."))
+		err = cache.AddEntry("req-1", "model", "What is machine learning?", []byte("req"), []byte("ML is..."), -1)
 		if err != nil {
 			t.Fatalf("Failed to add entry: %v", err)
 		}
@@ -2613,7 +3088,7 @@ func TestHybridVsMilvusSmoke(t *testing.T) {
 			t.Fatalf("Expected 'ML is...', got '%s'", string(resp))
 		}
 
-		t.Logf("✓ Milvus cache smoke test passed")
+		t.Logf("Milvus cache smoke test passed")
 	})
 
 	// Test Hybrid cache
@@ -2635,7 +3110,7 @@ func TestHybridVsMilvusSmoke(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		// Add entry
-		err = cache.AddEntry("req-1", "model", "What is deep learning?", []byte("req"), []byte("DL is..."))
+		err = cache.AddEntry("req-1", "model", "What is deep learning?", []byte("req"), []byte("DL is..."), -1)
 		if err != nil {
 			t.Fatalf("Failed to add entry: %v", err)
 		}
@@ -2654,7 +3129,7 @@ func TestHybridVsMilvusSmoke(t *testing.T) {
 			t.Fatalf("Expected 'DL is...', got '%s'", string(resp))
 		}
 
-		t.Logf("✓ Hybrid cache smoke test passed")
+		t.Logf("Hybrid cache smoke test passed")
 	})
 }
 
@@ -2675,14 +3150,14 @@ func TestInMemoryCacheIntegration(t *testing.T) {
 	t.Run("InMemoryCacheIntegration", func(t *testing.T) {
 		// Step 1: Add first entry
 		err := cache.AddEntry("req1", "test-model", "Hello world",
-			[]byte("request1"), []byte("response1"))
+			[]byte("request1"), []byte("response1"), -1)
 		if err != nil {
 			t.Fatalf("Failed to add first entry: %v", err)
 		}
 
 		// Step 2: Add second entry (cache at capacity)
 		err = cache.AddEntry("req2", "test-model", "Good morning",
-			[]byte("request2"), []byte("response2"))
+			[]byte("request2"), []byte("response2"), -1)
 		if err != nil {
 			t.Fatalf("Failed to add second entry: %v", err)
 		}
@@ -2723,7 +3198,7 @@ func TestInMemoryCacheIntegration(t *testing.T) {
 
 		// Step 5: Add third entry - should trigger LFU eviction
 		err = cache.AddEntry("req3", "test-model", "Bye",
-			[]byte("request3"), []byte("response3"))
+			[]byte("request3"), []byte("response3"), -1)
 		if err != nil {
 			t.Fatalf("Failed to add third entry: %v", err)
 		}
@@ -2761,7 +3236,7 @@ func TestInMemoryCachePendingRequestWorkflow(t *testing.T) {
 
 	t.Run("PendingRequestFlow", func(t *testing.T) {
 		// Step 1: Add pending request
-		err := cache.AddPendingRequest("req1", "test-model", "test query", []byte("request"))
+		err := cache.AddPendingRequest("req1", "test-model", "test query", []byte("request"), -1)
 		if err != nil {
 			t.Fatalf("Failed to add pending request: %v", err)
 		}
@@ -2776,7 +3251,7 @@ func TestInMemoryCachePendingRequestWorkflow(t *testing.T) {
 		}
 
 		// Step 2: Update with response
-		err = cache.UpdateWithResponse("req1", []byte("response1"))
+		err = cache.UpdateWithResponse("req1", []byte("response1"), -1)
 		if err != nil {
 			t.Fatalf("Failed to update with response: %v", err)
 		}
@@ -2865,12 +3340,12 @@ func TestInMemoryCacheHNSW(t *testing.T) {
 		// Add entries to both caches
 		for i, q := range testQueries {
 			reqID := fmt.Sprintf("req%d", i)
-			err := cacheHNSW.AddEntry(reqID, q.model, q.query, []byte(q.query), []byte(q.response))
+			err := cacheHNSW.AddEntry(reqID, q.model, q.query, []byte(q.query), []byte(q.response), -1)
 			if err != nil {
 				t.Fatalf("Failed to add entry to HNSW cache: %v", err)
 			}
 
-			err = cacheLinear.AddEntry(reqID, q.model, q.query, []byte(q.query), []byte(q.response))
+			err = cacheLinear.AddEntry(reqID, q.model, q.query, []byte(q.query), []byte(q.response), -1)
 			if err != nil {
 				t.Fatalf("Failed to add entry to linear cache: %v", err)
 			}
@@ -2928,7 +3403,7 @@ func TestInMemoryCacheHNSW(t *testing.T) {
 		})
 
 		// Add an entry
-		err := cacheTTL.AddEntry("req1", "test-model", "test query", []byte("request"), []byte("response"))
+		err := cacheTTL.AddEntry("req1", "test-model", "test query", []byte("request"), []byte("response"), -1)
 		if err != nil {
 			t.Fatalf("Failed to add entry: %v", err)
 		}
@@ -2984,7 +3459,7 @@ func BenchmarkInMemoryCacheSearch(b *testing.B) {
 			// Populate cache
 			for i, entry := range entries {
 				reqID := fmt.Sprintf("req%d", i)
-				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response))
+				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response), -1)
 			}
 
 			// Benchmark search
@@ -3010,7 +3485,7 @@ func BenchmarkInMemoryCacheSearch(b *testing.B) {
 			// Populate cache
 			for i, entry := range entries {
 				reqID := fmt.Sprintf("req%d", i)
-				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response))
+				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response), -1)
 			}
 
 			// Benchmark search
@@ -3056,7 +3531,7 @@ func BenchmarkHNSWIndexConstruction(b *testing.B) {
 				// Add entries and build index
 				for j := 0; j < count; j++ {
 					reqID := fmt.Sprintf("req%d", j)
-					_ = cache.AddEntry(reqID, "test-model", testQueries[j], []byte(testQueries[j]), []byte("response"))
+					_ = cache.AddEntry(reqID, "test-model", testQueries[j], []byte(testQueries[j]), []byte("response"), -1)
 				}
 			}
 		})
@@ -3106,7 +3581,7 @@ func BenchmarkHNSWParameters(b *testing.B) {
 			// Populate cache
 			for i, entry := range entries {
 				reqID := fmt.Sprintf("req%d", i)
-				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response))
+				_ = cache.AddEntry(reqID, "test-model", entry.query, []byte(entry.query), []byte(entry.response), -1)
 			}
 
 			// Benchmark search
@@ -3140,7 +3615,7 @@ func BenchmarkCacheOperations(b *testing.B) {
 			reqID := fmt.Sprintf("req%d", i)
 
 			// Add entry
-			_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+			_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 
 			// Find similar
 			_, _, _ = cache.FindSimilar("test-model", query)
@@ -3164,7 +3639,7 @@ func BenchmarkCacheOperations(b *testing.B) {
 			reqID := fmt.Sprintf("req%d", i)
 
 			// Add entry
-			_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+			_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 
 			// Find similar
 			_, _, _ = cache.FindSimilar("test-model", query)
@@ -3197,7 +3672,7 @@ func BenchmarkHNSWRebuild(b *testing.B) {
 			for i := 0; i < size; i++ {
 				query := fmt.Sprintf("Query %d about machine learning", i)
 				reqID := fmt.Sprintf("req%d", i)
-				_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"))
+				_ = cache.AddEntry(reqID, "test-model", query, []byte(query), []byte("response"), -1)
 			}
 
 			b.ResetTimer()
@@ -3415,7 +3890,7 @@ func BenchmarkLargeScale(b *testing.B) {
 						embPerSec, remaining.Round(time.Second))
 				}
 			}
-			b.Logf("✓ Generated %d embeddings in %v (%.0f emb/sec)",
+			b.Logf("Generated %d embeddings in %v (%.0f emb/sec)",
 				cacheSize, time.Since(embStart), float64(cacheSize)/time.Since(embStart).Seconds())
 
 			// Test query (use a query similar to middle entries for realistic search)
@@ -3447,6 +3922,7 @@ func BenchmarkLargeScale(b *testing.B) {
 						testQueries[i],
 						[]byte(fmt.Sprintf("request-%d", i)),
 						[]byte(fmt.Sprintf("response-%d", i)),
+						-1,
 					)
 					if err != nil {
 						b.Fatalf("Failed to add entry: %v", err)
@@ -3457,7 +3933,7 @@ func BenchmarkLargeScale(b *testing.B) {
 							i+1, cacheSize, float64(i+1)/float64(cacheSize)*100)
 					}
 				}
-				b.Logf("✓ Linear cache built. Starting search benchmark...")
+				b.Logf("Linear cache built. Starting search benchmark...")
 
 				// Run search benchmark
 				b.ResetTimer()
@@ -3471,7 +3947,7 @@ func BenchmarkLargeScale(b *testing.B) {
 				b.StopTimer()
 
 				linearLatency = float64(time.Since(start).Nanoseconds()) / float64(b.N)
-				b.Logf("✓ Linear search complete: %.2f ms per query (%d iterations)",
+				b.Logf("Linear search complete: %.2f ms per query (%d iterations)",
 					linearLatency/1e6, b.N)
 
 				// Write to CSV
@@ -3516,6 +3992,7 @@ func BenchmarkLargeScale(b *testing.B) {
 							testQueries[i],
 							[]byte(fmt.Sprintf("request-%d", i)),
 							[]byte(fmt.Sprintf("response-%d", i)),
+							-1,
 						)
 						if err != nil {
 							b.Fatalf("Failed to add entry: %v", err)
@@ -3535,7 +4012,7 @@ func BenchmarkLargeScale(b *testing.B) {
 						}
 					}
 					buildTime := time.Since(buildStart)
-					b.Logf("✓ HNSW index built in %v (%.0f entries/sec)",
+					b.Logf("HNSW index built in %v (%.0f entries/sec)",
 						buildTime, float64(cacheSize)/buildTime.Seconds())
 
 					// Run search benchmark
@@ -3553,7 +4030,7 @@ func BenchmarkLargeScale(b *testing.B) {
 					hnswLatency := float64(time.Since(start).Nanoseconds()) / float64(b.N)
 					speedup := linearLatency / hnswLatency
 
-					b.Logf("✓ HNSW search complete: %.2f ms per query (%d iterations)",
+					b.Logf("HNSW search complete: %.2f ms per query (%d iterations)",
 						hnswLatency/1e6, b.N)
 					b.Logf("📊 SPEEDUP: %.1fx faster than linear search (%.2f ms vs %.2f ms)",
 						speedup, hnswLatency/1e6, linearLatency/1e6)
@@ -3632,7 +4109,7 @@ func BenchmarkScalability(b *testing.B) {
 
 					for i := 0; i < cacheSize; i++ {
 						if err := cache.AddEntry(fmt.Sprintf("req-%d", i), "model",
-							testQueries[i], []byte("req"), []byte("resp")); err != nil {
+							testQueries[i], []byte("req"), []byte("resp"), -1); err != nil {
 							b.Fatalf("AddEntry failed: %v", err)
 						}
 					}
@@ -3676,7 +4153,7 @@ func BenchmarkScalability(b *testing.B) {
 				buildStart := time.Now()
 				for i := 0; i < cacheSize; i++ {
 					if err := cache.AddEntry(fmt.Sprintf("req-%d", i), "model",
-						testQueries[i], []byte("req"), []byte("resp")); err != nil {
+						testQueries[i], []byte("req"), []byte("resp"), -1); err != nil {
 						b.Fatalf("AddEntry failed: %v", err)
 					}
 					if (i+1)%10000 == 0 {
@@ -3796,7 +4273,7 @@ func BenchmarkHNSWParameterSweep(b *testing.B) {
 			buildStart := time.Now()
 			for i := 0; i < cacheSize; i++ {
 				if err := cache.AddEntry(fmt.Sprintf("req-%d", i), "model",
-					testQueries[i], []byte("req"), []byte("resp")); err != nil {
+					testQueries[i], []byte("req"), []byte("resp"), -1); err != nil {
 					b.Fatalf("AddEntry failed: %v", err)
 				}
 				if (i+1)%10000 == 0 {

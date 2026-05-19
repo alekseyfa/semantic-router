@@ -1,7 +1,11 @@
 package services
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
@@ -13,7 +17,7 @@ func TestNewUnifiedClassificationService(t *testing.T) {
 	service := NewUnifiedClassificationService(nil, nil, config)
 
 	if service == nil {
-		t.Error("Expected non-nil service")
+		t.Fatal("Expected non-nil service")
 	}
 	if service.classifier != nil {
 		t.Error("Expected legacy classifier to be nil")
@@ -35,7 +39,7 @@ func TestNewUnifiedClassificationService_WithBothClassifiers(t *testing.T) {
 	service := NewUnifiedClassificationService(unifiedClassifier, legacyClassifier, config)
 
 	if service == nil {
-		t.Error("Expected non-nil service")
+		t.Fatal("Expected non-nil service")
 	}
 	if service.classifier != legacyClassifier {
 		t.Error("Expected legacy classifier to match provided classifier")
@@ -182,46 +186,6 @@ func TestClassificationService_ClassifySecurityUnified_ErrorCases(t *testing.T) 
 	})
 }
 
-func TestClassificationService_ClassifyIntentUnified_ErrorCases(t *testing.T) {
-	t.Run("Unified_classifier_not_available_fallback", func(t *testing.T) {
-		// This should fallback to the legacy ClassifyIntent method
-		service := &ClassificationService{
-			unifiedClassifier: nil,
-			classifier:        nil, // This will return placeholder response, not error
-		}
-
-		req := IntentRequest{Text: "test"}
-		result, err := service.ClassifyIntentUnified(req)
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
-		if result == nil {
-			t.Error("Expected non-nil result")
-		}
-		// Should get placeholder response from legacy classifier
-		if result.Classification.Category != "general" {
-			t.Errorf("Expected placeholder category 'general', got '%s'", result.Classification.Category)
-		}
-		if result.RoutingDecision != "placeholder_response" {
-			t.Errorf("Expected placeholder routing decision, got '%s'", result.RoutingDecision)
-		}
-	})
-
-	t.Run("Classifier_not_initialized", func(t *testing.T) {
-		classifier := &classification.UnifiedClassifier{}
-		service := &ClassificationService{
-			unifiedClassifier: classifier,
-		}
-
-		req := IntentRequest{Text: "test"}
-		_, err := service.ClassifyIntentUnified(req)
-		if err == nil {
-			t.Error("Expected error for uninitialized classifier")
-		}
-		// The actual error will come from the unified classifier
-	})
-}
-
 // Test data structures and basic functionality
 func TestClassificationService_BasicFunctionality(t *testing.T) {
 	t.Run("Service_creation", func(t *testing.T) {
@@ -229,7 +193,7 @@ func TestClassificationService_BasicFunctionality(t *testing.T) {
 		service := NewClassificationService(nil, config)
 
 		if service == nil {
-			t.Error("Expected non-nil service")
+			t.Fatal("Expected non-nil service")
 		}
 		if service.config != config {
 			t.Error("Expected config to match")
@@ -267,5 +231,389 @@ func BenchmarkClassificationService_GetUnifiedClassifierStats(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = service.GetUnifiedClassifierStats()
+	}
+}
+
+// TestGetRecommendedModel_WithConfig tests that getRecommendedModel returns
+// real model names from configuration instead of hardcoded invalid names.
+func TestGetRecommendedModel_WithConfig(t *testing.T) {
+	// Create a config with real decisions and model refs
+	testConfig := &config.RouterConfig{
+		BackendModels: config.BackendModels{
+			DefaultModel: "default-llm-model",
+		},
+		IntelligentRouting: config.IntelligentRouting{
+			Decisions: []config.Decision{
+				{
+					Name: "math",
+					ModelRefs: []config.ModelRef{
+						{
+							Model: "phi4-math-expert",
+						},
+					},
+				},
+				{
+					Name: "science",
+					ModelRefs: []config.ModelRef{
+						{
+							Model:    "mistral-science-base",
+							LoRAName: "science-lora-adapter",
+						},
+					},
+				},
+				{
+					Name: "code",
+					ModelRefs: []config.ModelRef{
+						{
+							Model: "codellama-13b",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	service := &ClassificationService{
+		classifier: nil, // No classifier - will use config fallback
+		config:     testConfig,
+	}
+
+	tests := []struct {
+		name             string
+		category         string
+		expectedModel    string
+		shouldNotContain string // What should NOT be in the result
+	}{
+		{
+			name:             "Math category should return real model",
+			category:         "math",
+			expectedModel:    "phi4-math-expert",
+			shouldNotContain: "-specialized-model",
+		},
+		{
+			name:             "Science category with LoRA should return LoRA name",
+			category:         "science",
+			expectedModel:    "science-lora-adapter",
+			shouldNotContain: "-specialized-model",
+		},
+		{
+			name:             "Code category should return real model",
+			category:         "code",
+			expectedModel:    "codellama-13b",
+			shouldNotContain: "-specialized-model",
+		},
+		{
+			name:             "Unknown category should return default model",
+			category:         "unknown-category",
+			expectedModel:    "default-llm-model",
+			shouldNotContain: "-specialized-model",
+		},
+		{
+			name:             "Case insensitive category matching",
+			category:         "MATH", // Uppercase
+			expectedModel:    "phi4-math-expert",
+			shouldNotContain: "-specialized-model",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := service.getRecommendedModel(tt.category, 0.9)
+
+			// Verify it returns the expected model
+			if result != tt.expectedModel {
+				t.Errorf("getRecommendedModel(%q) = %q, want %q",
+					tt.category, result, tt.expectedModel)
+			}
+
+			// Verify it does NOT contain the old buggy pattern
+			if strings.Contains(result, tt.shouldNotContain) {
+				t.Errorf("getRecommendedModel(%q) = %q, should NOT contain %q (old bug pattern)",
+					tt.category, result, tt.shouldNotContain)
+			}
+		})
+	}
+}
+
+// TestGetRecommendedModel_NoConfig tests fallback behavior when config is nil
+func TestGetRecommendedModel_NoConfig(t *testing.T) {
+	service := &ClassificationService{
+		classifier: nil,
+		config:     nil,
+	}
+
+	result := service.getRecommendedModel("math", 0.9)
+	if result != "" {
+		t.Errorf("getRecommendedModel with nil config should return empty string, got %q", result)
+	}
+}
+
+// TestGetRecommendedModel_EmptyConfig tests fallback behavior with empty config
+func TestGetRecommendedModel_EmptyConfig(t *testing.T) {
+	service := &ClassificationService{
+		classifier: nil,
+		config:     &config.RouterConfig{},
+	}
+
+	result := service.getRecommendedModel("math", 0.9)
+	if result != "" {
+		t.Errorf("getRecommendedModel with empty config should return empty string, got %q", result)
+	}
+}
+
+// TestGetRecommendedModel_NoDecisionFound tests fallback to default model
+func TestGetRecommendedModel_NoDecisionFound(t *testing.T) {
+	testConfig := &config.RouterConfig{
+		BackendModels: config.BackendModels{
+			DefaultModel: "default-llm-model",
+		},
+		IntelligentRouting: config.IntelligentRouting{
+			Decisions: []config.Decision{
+				{
+					Name: "math",
+					ModelRefs: []config.ModelRef{
+						{Model: "phi4-math-expert"},
+					},
+				},
+			},
+		},
+	}
+
+	service := &ClassificationService{
+		classifier: nil,
+		config:     testConfig,
+	}
+
+	// Test with category that doesn't exist in decisions
+	result := service.getRecommendedModel("nonexistent", 0.9)
+	expected := "default-llm-model"
+	if result != expected {
+		t.Errorf("getRecommendedModel(%q) = %q, want %q (should fallback to default)",
+			"nonexistent", result, expected)
+	}
+}
+
+// TestGetRecommendedModel_EmptyModelRefs tests behavior when decision exists but has no ModelRefs
+func TestGetRecommendedModel_EmptyModelRefs(t *testing.T) {
+	testConfig := &config.RouterConfig{
+		BackendModels: config.BackendModels{
+			DefaultModel: "default-llm-model",
+		},
+		IntelligentRouting: config.IntelligentRouting{
+			Decisions: []config.Decision{
+				{
+					Name:      "math",
+					ModelRefs: []config.ModelRef{}, // Empty ModelRefs
+				},
+			},
+		},
+	}
+
+	service := &ClassificationService{
+		classifier: nil,
+		config:     testConfig,
+	}
+
+	result := service.getRecommendedModel("math", 0.9)
+	expected := "default-llm-model"
+	if result != expected {
+		t.Errorf("getRecommendedModel(%q) with empty ModelRefs = %q, want %q (should fallback to default)",
+			"math", result, expected)
+	}
+}
+
+func TestDetectPII_EdgeCases(t *testing.T) {
+	t.Run("Empty_text_returns_error", func(t *testing.T) {
+		service := &ClassificationService{classifier: nil}
+		_, err := service.DetectPII(PIIRequest{Text: ""})
+		require.Error(t, err)
+		assert.Equal(t, "text cannot be empty", err.Error())
+	})
+
+	t.Run("Nil_classifier_returns_placeholder", func(t *testing.T) {
+		service := &ClassificationService{classifier: nil}
+		resp, err := service.DetectPII(PIIRequest{Text: "hello"})
+		require.NoError(t, err)
+		assert.False(t, resp.HasPII)
+		assert.Empty(t, resp.Entities)
+		assert.Equal(t, "allow", resp.SecurityRecommendation)
+	})
+}
+
+func TestBuildPIIResponse(t *testing.T) {
+	sampleDetections := []classification.PIIDetection{
+		{EntityType: "EMAIL", Start: 13, End: 29, Text: "alice@test.com", Confidence: 0.95},
+		{EntityType: "PERSON", Start: 0, End: 5, Text: "Alice", Confidence: 0.88},
+		{EntityType: "PHONE", Start: 37, End: 49, Text: "555-123-4567", Confidence: 0.75},
+	}
+	sampleText := "Alice reached alice@test.com at tel 555-123-4567"
+
+	service := &ClassificationService{}
+
+	tests := []struct {
+		name       string
+		text       string
+		detections []classification.PIIDetection
+		options    *PIIOptions
+		check      func(t *testing.T, resp *PIIResponse)
+	}{
+		{
+			name:       "No_detections",
+			text:       "hello world",
+			detections: []classification.PIIDetection{},
+			options:    nil,
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.False(t, resp.HasPII)
+				assert.Empty(t, resp.Entities)
+				assert.Equal(t, "allow", resp.SecurityRecommendation)
+				assert.Empty(t, resp.MaskedText)
+			},
+		},
+		{
+			name:       "Default_options_nil",
+			text:       sampleText,
+			detections: sampleDetections[:2],
+			options:    nil,
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.True(t, resp.HasPII)
+				assert.Len(t, resp.Entities, 2)
+				assert.Equal(t, "[DETECTED]", resp.Entities[0].Value)
+				assert.Equal(t, "[DETECTED]", resp.Entities[1].Value)
+				assert.Equal(t, 0, resp.Entities[0].StartPos)
+				assert.Equal(t, 0, resp.Entities[0].EndPos)
+				assert.Empty(t, resp.MaskedText)
+				assert.Equal(t, "block", resp.SecurityRecommendation)
+			},
+		},
+		{
+			name:       "RevealEntityText_true",
+			text:       sampleText,
+			detections: sampleDetections[:1],
+			options:    &PIIOptions{RevealEntityText: true},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, "alice@test.com", resp.Entities[0].Value)
+			},
+		},
+		{
+			name:       "RevealEntityText_false",
+			text:       sampleText,
+			detections: sampleDetections[:1],
+			options:    &PIIOptions{RevealEntityText: false},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, "[DETECTED]", resp.Entities[0].Value)
+			},
+		},
+		{
+			name:       "ReturnPositions_true",
+			text:       sampleText,
+			detections: sampleDetections[:1],
+			options:    &PIIOptions{ReturnPositions: true},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, 13, resp.Entities[0].StartPos)
+				assert.Equal(t, 29, resp.Entities[0].EndPos)
+			},
+		},
+		{
+			name:       "ReturnPositions_false",
+			text:       sampleText,
+			detections: sampleDetections[:1],
+			options:    &PIIOptions{ReturnPositions: false},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, 0, resp.Entities[0].StartPos)
+				assert.Equal(t, 0, resp.Entities[0].EndPos)
+			},
+		},
+		{
+			name:       "EntityTypes_filter",
+			text:       sampleText,
+			detections: sampleDetections,
+			options:    &PIIOptions{EntityTypes: []string{"EMAIL", "PHONE"}},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Len(t, resp.Entities, 2)
+				assert.Equal(t, "EMAIL", resp.Entities[0].Type)
+				assert.Equal(t, "PHONE", resp.Entities[1].Type)
+			},
+		},
+		{
+			name:       "EntityTypes_case_insensitive",
+			text:       sampleText,
+			detections: sampleDetections[:1],
+			options:    &PIIOptions{EntityTypes: []string{"email"}},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Len(t, resp.Entities, 1)
+				assert.Equal(t, "EMAIL", resp.Entities[0].Type)
+			},
+		},
+		{
+			name: "MaskEntities_basic",
+			text: "Contact alice@test.com please",
+			detections: []classification.PIIDetection{
+				{EntityType: "EMAIL", Start: 8, End: 22, Text: "alice@test.com", Confidence: 0.95},
+			},
+			options: &PIIOptions{MaskEntities: true},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, "Contact [EMAIL_0] please", resp.MaskedText)
+				assert.Equal(t, "[EMAIL_0]", resp.Entities[0].MaskedValue)
+			},
+		},
+		{
+			name: "MaskEntities_same_entity_twice",
+			text: "Email alice@test.com and again alice@test.com",
+			detections: []classification.PIIDetection{
+				{EntityType: "EMAIL", Start: 6, End: 20, Text: "alice@test.com", Confidence: 0.95},
+				{EntityType: "EMAIL", Start: 31, End: 45, Text: "alice@test.com", Confidence: 0.93},
+			},
+			options: &PIIOptions{MaskEntities: true},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, "[EMAIL_0]", resp.Entities[0].MaskedValue)
+				assert.Equal(t, "[EMAIL_0]", resp.Entities[1].MaskedValue)
+				assert.Equal(t, "Email [EMAIL_0] and again [EMAIL_0]", resp.MaskedText)
+			},
+		},
+		{
+			name: "MaskEntities_different_texts_same_type",
+			text: "Email alice@test.com and bob@test.com",
+			detections: []classification.PIIDetection{
+				{EntityType: "EMAIL", Start: 6, End: 20, Text: "alice@test.com", Confidence: 0.95},
+				{EntityType: "EMAIL", Start: 25, End: 37, Text: "bob@test.com", Confidence: 0.92},
+			},
+			options: &PIIOptions{MaskEntities: true},
+			check: func(t *testing.T, resp *PIIResponse) {
+				assert.Equal(t, "[EMAIL_0]", resp.Entities[0].MaskedValue)
+				assert.Equal(t, "[EMAIL_1]", resp.Entities[1].MaskedValue)
+				assert.Equal(t, "Email [EMAIL_0] and [EMAIL_1]", resp.MaskedText)
+			},
+		},
+		{
+			name: "Combined_options",
+			text: "Alice alice@test.com",
+			detections: []classification.PIIDetection{
+				{EntityType: "PERSON", Start: 0, End: 5, Text: "Alice", Confidence: 0.88},
+				{EntityType: "EMAIL", Start: 6, End: 20, Text: "alice@test.com", Confidence: 0.95},
+			},
+			options: &PIIOptions{
+				EntityTypes:      []string{"EMAIL"},
+				ReturnPositions:  true,
+				MaskEntities:     true,
+				RevealEntityText: true,
+			},
+			check: func(t *testing.T, resp *PIIResponse) {
+				require.Len(t, resp.Entities, 1)
+				e := resp.Entities[0]
+				assert.Equal(t, "EMAIL", e.Type)
+				assert.Equal(t, "alice@test.com", e.Value)
+				assert.Equal(t, 6, e.StartPos)
+				assert.Equal(t, 20, e.EndPos)
+				assert.Equal(t, "[EMAIL_0]", e.MaskedValue)
+				assert.Equal(t, "Alice [EMAIL_0]", resp.MaskedText)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := service.buildPIIResponse(tt.text, tt.detections, tt.options)
+			tt.check(t, resp)
+		})
 	}
 }

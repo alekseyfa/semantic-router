@@ -1,330 +1,475 @@
+/* Clean Console Style - Top Navigation Layout */
 .container {
   display: flex;
-  height: 100vh;
-  overflow: hidden;
+  flex-direction: column;
+  min-height: 100vh;
   background-color: var(--color-bg);
 }
 
-.sidebar {
-  width: 260px;
-  background-color: var(--color-bg-secondary);
-  border-right: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  padding: 1.25rem 0.75rem;
-  gap: 1.5rem;
-  transition: width var(--transition-fast);
-}
-
-.sidebarCollapsed {
-  width: 70px;
-}
-
-.brandContainer {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0 0.25rem;
-  justify-content: center;
-}
-
-.sidebarCollapsed .brandContainer {
-  justify-content: center;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  padding: 0.25rem 0.375rem;
-  text-decoration: none;
-  border-radius: var(--radius-md);
-  transition: background-color var(--transition-fast);
-  cursor: pointer;
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-}
-
-.brand:hover {
-  background-color: var(--color-bg-tertiary);
-}
-
-.sidebarCollapsed .brand {
-  justify-content: center;
-  padding: 0.5rem;
-}
-
-.logo {
-  width: 28px;
-  height: 28px;
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
-.brandText {
-  font-size: 0.9375rem;
-  font-weight: 600;
-  color: var(--color-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  min-width: 0;
-}
-
-.nav {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
-.navLink {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 0.875rem;
-  border-radius: var(--radius-md);
-  color: var(--color-text-secondary);
-  font-size: 0.9375rem;
-  font-weight: 500;
-  transition: all var(--transition-fast);
-  text-decoration: none;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  white-space: nowrap;
-}
-
-.navLink:hover {
-  background-color: var(--color-bg-tertiary);
-  color: var(--color-text);
-}
-
-.navLinkActive {
-  background-color: var(--color-primary);
-  color: white;
-}
-
-.navLinkActive:hover {
-  background-color: var(--color-primary-dark);
-  color: white;
-}
-
-.navIcon {
-  font-size: 1.125rem;
-  line-height: 1;
-  width: 1.375rem;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.navText {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sidebarCollapsed .navLink {
-  justify-content: center;
-  padding: 0.75rem 0.5rem;
-}
-
-.sidebarCollapsed .navIcon {
-  width: auto;
-}
-
-/* Sub Navigation (Configuration sections) - Match parent nav style */
-.subNav {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  margin-top: 0.25rem;
-  margin-bottom: 0.25rem;
-  padding-left: 1.75rem;
-}
-
-.subNavLink {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.625rem;
-  border-radius: var(--radius-md);
-  color: var(--color-text-secondary);
-  font-size: 0.9rem;
-  font-weight: 500;
-  transition: all var(--transition-fast);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-}
-
-.subNavLink:hover {
-  background-color: var(--color-bg-tertiary);
-  color: var(--color-text);
-}
-
-.subNavLinkActive {
-  background-color: var(--color-primary);
-  color: white;
-}
-
-.subNavLinkActive:hover {
-  background-color: var(--color-primary-dark);
-  color: white;
-}
-
-.subNavIcon {
-  font-size: 1rem;
-  line-height: 1;
-  width: 1.25rem;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.subNavText {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sidebarFooter {
-  margin-top: auto;
-  padding: 0 0.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.collapseButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 6px;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.collapseButton:hover {
-  background-color: var(--color-bg-tertiary);
-  color: var(--color-text);
-}
-
-.collapseButton svg {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-}
-
-.main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-}
-
+/* Top Header/Navigation Bar */
 .header {
-  background-color: var(--color-bg-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background-color: var(--color-bg-header);
   border-bottom: 1px solid var(--color-border);
-  padding: 0 1.5rem;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
 }
 
 .headerContent {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  height: 52px;
+  padding: 0 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
   width: 100%;
+  position: relative;
 }
 
-.headerLeft {
-  flex: 1;
+/* Brand - positioned left within centered container */
+.brand {
+  position: absolute;
+  left: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-decoration: none;
+  padding: 0.25rem 0;
+  transition: all var(--transition-fast);
 }
 
-.headerBrand {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  opacity: 0.7;
+.brand:hover {
+  opacity: 0.85;
 }
 
-.headerRight {
+.logo {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.brandText {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+/* Center Navigation - truly centered */
+.nav {
   display: flex;
   align-items: center;
   gap: 0.75rem;
 }
 
-.headerIconButton {
+.navSection {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.navSectionSecondary {
+  padding-left: 0.125rem;
+}
+
+.navLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0 1rem;
+  height: 32px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: var(--radius-sm);
+  vertical-align: middle;
+  text-shadow: none;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+.navLink:hover {
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.05);
+  text-shadow: none;
+}
+
+.navLinkActive {
+  color: var(--color-text);
+  background: rgba(118, 185, 0, 0.1);
+  text-shadow: none;
+}
+
+.navLinkActive::after {
+  display: none;
+}
+
+/* Vertical divider between primary and secondary navigation groups */
+.navDivider {
+  width: 1px;
+  height: 20px;
+  background-color: var(--color-border);
+  margin: 0;
+  flex-shrink: 0;
+}
+
+/* Reset any inherited styles from global a tags */
+a.navLink {
+  text-shadow: none !important;
+  box-shadow: none !important;
+  color: var(--color-text-secondary) !important;
+}
+
+a.navLink:hover {
+  text-shadow: none !important;
+  color: var(--color-text) !important;
+}
+
+a.navLink.navLinkActive {
+  color: var(--color-text) !important;
+}
+
+/* Ensure button.navLink has same height as a.navLink */
+button.navLink {
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 1rem;
+}
+
+/* Nav Dropdowns */
+.navDropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dropdownArrow {
+  margin-left: 0.25rem;
+  transition: transform var(--transition-fast);
+  opacity: 0.6;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dropdownArrowOpen {
+  transform: rotate(180deg);
+}
+
+.dropdownMenu {
+  position: absolute;
+  top: calc(100% + 0.75rem);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 152px;
+  width: max-content;
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.25rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  animation: dropdownFadeIn 0.15s ease;
+}
+
+@keyframes dropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Right-aligned dropdown to prevent viewport overflow */
+.dropdownMenuRight {
+  position: absolute;
+  top: calc(100% + 0.75rem);
+  right: 0;
+  left: auto;
+  transform: none;
+  min-width: 186px;
+  width: max-content;
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.25rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  animation: dropdownFadeInRight 0.15s ease;
+}
+
+@keyframes dropdownFadeInRight {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dropdownItem {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.5rem;
-  font-size: 1.25rem;
-  border-radius: var(--radius-md);
+  width: 100%;
+  min-width: 100%;
+  padding: 0.5rem 0.875rem;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  transition: all var(--transition-fast);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  position: relative;
+}
+
+.dropdownItem:hover {
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text);
+}
+
+.dropdownItemActive {
+  color: var(--color-text);
+  background-color: var(--color-bg-tertiary);
+}
+
+.dropdownItemActive::before {
+  content: '';
+  width: 3px;
+  position: absolute;
+  left: 0;
+  top: 0.375rem;
+  bottom: 0.375rem;
+  background-color: var(--color-primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.dropdownSectionLabel {
+  padding: 0.375rem 0.875rem 0.25rem;
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.dropdownDivider {
+  height: 1px;
+  background-color: var(--color-border);
+  margin: 0.3rem 0;
+}
+
+/* Right Actions - positioned right within centered container */
+.headerRight {
+  position: absolute;
+  right: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.headerBranding {
+  /* Hide on mobile to save space */
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .headerBranding {
+    display: flex;
+  }
+}
+
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
   background: transparent;
   border: none;
   cursor: pointer;
   color: var(--color-text-secondary);
   text-decoration: none;
+  font-size: var(--text-base);
 }
 
-.headerIconButton:hover {
-  background-color: var(--color-bg-tertiary);
+.iconButton:hover {
   color: var(--color-text);
+}
+
+.iconButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Mobile Menu Button */
+.mobileMenuButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.mobileMenuButton:hover {
+  color: var(--color-text);
+}
+
+/* Mobile Navigation */
+.mobileNav {
+  display: none;
+  flex-direction: column;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--color-border);
+  background-color: var(--color-bg-header);
+}
+
+.mobileNavLink {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  text-decoration: none;
+  transition: all var(--transition-fast);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mobileNavLink:hover,
+.mobileNavLink.active {
+  color: var(--color-text);
+}
+
+.mobileNavLinkActive {
+  color: var(--color-text);
+  background-color: var(--color-bg-tertiary);
+}
+
+.mobileNavSection {
+  display: flex;
+  flex-direction: column;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.mobileNavSectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.5rem 0.75rem 0.25rem;
+}
+
+.mobileNavSubsectionTitle {
+  padding: 0.5rem 0.75rem 0.125rem;
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Main Content Area */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-bg);
 }
 
 .mainContent {
   flex: 1;
-  overflow: auto;
-  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Responsive adjustments */
+/* Responsive */
+@media (max-width: 1024px) {
+  .nav {
+    gap: 0.35rem;
+  }
+
+  .navSection {
+    gap: 0;
+  }
+
+  .navLink {
+    padding: 0.5rem 0.5rem;
+    font-size: var(--text-xs);
+  }
+
+  .navDivider {
+    margin: 0;
+  }
+}
+
 @media (max-width: 768px) {
-  .sidebar {
-    width: 70px;
+  .headerContent {
+    padding: 0 1rem;
+  }
+
+  .nav {
+    display: none;
+  }
+
+  .mobileMenuButton {
+    display: flex;
+  }
+
+  .mobileNav {
+    display: flex;
   }
 
   .brandText {
     display: none;
   }
 
-  .navText {
+  /* Hide header on mobile for specific pages */
+  .headerHideMobile {
     display: none;
   }
 
-  .collapseButton {
-    display: none;
+  .hideHeaderMobile .main {
+    padding-top: 0;
   }
 
-  .sidebarFooter a {
-    display: none;
-  }
-
-  .header {
-    padding: 0 1rem;
-  }
-
-  .headerRight {
-    gap: 1rem;
+  .hideHeaderMobile .mainContent {
+    height: 100vh;
   }
 }

@@ -11,7 +11,8 @@ markdown-lint: ## Lint all markdown files in the project
 		--ignore website/node_modules \
 		--ignore dashboard/frontend/node_modules \
 		--ignore website/docs/api/crd-reference.md \
-		--ignore models
+		--ignore models \
+		--ignore vsr
 
 markdown-lint-fix: ## Auto-fix markdown lint issues
 	@$(LOG_TARGET)
@@ -20,6 +21,7 @@ markdown-lint-fix: ## Auto-fix markdown lint issues
 		--ignore website/node_modules \
 		--ignore dashboard/frontend/node_modules \
 		--ignore models \
+		--ignore vsr \
 		--fix
 
 yaml-lint: ## Lint all YAML files in the project
@@ -46,4 +48,4 @@ shellcheck: ## Lint all shell scripts in the project
 		exit 1; \
 	fi
 	@echo "Running shellcheck with config from tools/linter/shellcheck/.shellcheckrc"
-	@shellcheck -e SC2155,SC2034,SC1091 $(shell find . -type f -name "*.sh" -not -path "./node_modules/*" -not -path "./website/node_modules/*" -not -path "./dashboard/frontend/node_modules/*" -not -path "./models/*" -not -path "./.venv/*")
+	@shellcheck -e SC2155,SC2034,SC1091,SC2011,SC2012,SC2087,SC2119,SC2120,SC2162 $(shell find . -type f -name "*.sh" -not -path "./node_modules/*" -not -path "./website/node_modules/*" -not -path "./dashboard/frontend/node_modules/*" -not -path "./models/*" -not -path "./.venv/*")

@@ -1,100 +1,80 @@
 package extproc
 
 import (
+	"fmt"
 	"time"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/openai/openai-go"
-	"go.opentelemetry.io/otel/attribute"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
-	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
-	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/tracing"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/entropy"
 )
 
-// handleRequestBody processes the request body
+type requestDecisionState struct {
+	decisionName      string
+	reasoningDecision entropy.ReasoningDecision
+	selectedModel     string
+}
+
+// handleRequestBody processes the request body.
+//
+// The hot path uses gjson-based field extraction (extractContentFast) to avoid
+// the expensive json.Unmarshal into the full OpenAI SDK struct. The SDK struct
+// is parsed lazily — only when body mutations are actually needed (modality
+// routing, memory injection, model routing). Requests that hit fast_response,
+// rate limiting, or cache never pay the full parse cost.
 func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
-	logging.Infof("Processing request body: %s", string(v.RequestBody.GetBody()))
-	// Record start time for model routing
 	ctx.ProcessingStartTime = time.Now()
-	// Save the original request body
 	ctx.OriginalRequestBody = v.RequestBody.GetBody()
 
-	// Extract stream parameter from original request and update ExpectStreamingResponse if needed
-	hasStreamParam := extractStreamParam(ctx.OriginalRequestBody)
-	if hasStreamParam {
-		logging.Infof("Original request contains stream parameter: true")
-		ctx.ExpectStreamingResponse = true // Set this if stream param is found
+	requestBody, earlyResponse := r.translateResponseAPIRequest(ctx.OriginalRequestBody, ctx)
+	if earlyResponse != nil {
+		return earlyResponse, nil
 	}
 
-	// Parse the OpenAI request using SDK types
-	openAIRequest, err := parseOpenAIRequest(ctx.OriginalRequestBody)
+	fast, err := r.extractFastRequestState(requestBody, ctx)
 	if err != nil {
-		logging.Errorf("Error parsing OpenAI request: %v", err)
-		// Attempt to determine model for labeling (may be unknown here)
-		metrics.RecordRequestError(ctx.RequestModel, "parse_error")
-		// Count this request as well, with unknown model if necessary
-		metrics.RecordModelRequest(ctx.RequestModel)
-		return nil, status.Errorf(codes.InvalidArgument, "invalid request body: %v", err)
+		return nil, err
 	}
 
-	// Store the original model
-	originalModel := openAIRequest.Model
-
-	// Set model on span
-	if ctx.TraceContext != nil {
-		_, span := tracing.StartSpan(ctx.TraceContext, "parse_request")
-		tracing.SetSpanAttributes(span,
-			attribute.String(tracing.AttrOriginalModel, originalModel))
-		span.End()
-	}
-
-	// Record the initial request to this model (count all requests)
-	metrics.RecordModelRequest(originalModel)
-	// Also set the model on context early so error metrics can label it
+	originalModel := fast.Model
 	if ctx.RequestModel == "" {
 		ctx.RequestModel = originalModel
 	}
-
-	// Get content from messages
-	userContent, nonUserMessages := extractUserAndNonUserContent(openAIRequest)
-
-	// Perform decision evaluation and model selection once at the beginning
-	// Use decision-based routing if decisions are configured, otherwise fall back to category-based
-	decisionName, classificationConfidence, reasoningDecision, selectedModel := r.performDecisionEvaluationAndModelSelection(originalModel, userContent, nonUserMessages, ctx)
-
-	// Perform security checks with decision-specific settings
-	if response, shouldReturn := r.performSecurityChecks(ctx, userContent, nonUserMessages, decisionName); shouldReturn {
-		return response, nil
+	if r.isLooperRequest(ctx) {
+		logging.Infof("[Looper] Internal request detected, executing decision plugins for model: %s", originalModel)
+		return r.handleLooperInternalRequestWithPlugins(originalModel, ctx)
 	}
 
-	// Perform PII detection and policy check (if PII policy is enabled for the decision)
-	piiResponse := r.performPIIDetection(ctx, userContent, nonUserMessages, decisionName)
-	if piiResponse != nil {
-		// PII policy violation - return error response
-		return piiResponse, nil
+	ctx.UserContent = fast.UserContent
+	ctx.RequestImageURL = fast.FirstImageURL
+
+	decisionState, earlyResponse := r.runRequestPreRoutingStages(originalModel, fast, ctx)
+	if earlyResponse != nil {
+		return earlyResponse, nil
 	}
 
-	// Handle caching with decision-specific settings
-	logging.Infof("About to call handleCaching - decisionName=%s, cacheEnabled=%v", decisionName, r.Config.SemanticCache.Enabled)
-	if response, shouldReturn := r.handleCaching(ctx, decisionName); shouldReturn {
-		logging.Infof("handleCaching returned a response, returning immediately")
-		return response, nil
+	openAIRequest, earlyResponse, err := r.prepareRequestForModelRouting(requestBody, fast.UserContent, ctx)
+	if earlyResponse != nil || err != nil {
+		return earlyResponse, err
 	}
-	logging.Infof("handleCaching returned no cached response, continuing to model routing")
 
-	// Handle model selection and routing with pre-computed classification results and selected model
-	return r.handleModelRouting(openAIRequest, originalModel, decisionName, classificationConfidence, reasoningDecision, selectedModel, ctx)
+	return r.handleModelRouting(
+		openAIRequest,
+		originalModel,
+		decisionState.decisionName,
+		decisionState.reasoningDecision,
+		decisionState.selectedModel,
+		ctx,
+	)
 }
 
 // handleModelRouting handles model selection and routing logic
-// decisionName, classificationConfidence, reasoningDecision, and selectedModel are pre-computed from ProcessRequest
-func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNewParams, originalModel string, decisionName string, classificationConfidence float64, reasoningDecision entropy.ReasoningDecision, selectedModel string, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+// decisionName, reasoningDecision, and selectedModel are pre-computed from ProcessRequest
+func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNewParams, originalModel string, decisionName string, reasoningDecision entropy.ReasoningDecision, selectedModel string, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
 	response := &ext_proc.ProcessingResponse{
 		Response: &ext_proc.ProcessingResponse_RequestBody{
 			RequestBody: &ext_proc.BodyResponse{
@@ -107,15 +87,31 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNe
 
 	isAutoModel := r.Config != nil && r.Config.IsAutoModelName(originalModel)
 
+	targetModel := originalModel
 	if isAutoModel && selectedModel != "" {
-		return r.handleAutoModelRouting(openAIRequest, originalModel, decisionName, reasoningDecision, selectedModel, ctx, response)
-	} else if !isAutoModel {
-		return r.handleSpecifiedModelRouting(openAIRequest, originalModel, ctx)
+		targetModel = selectedModel
 	}
 
-	// No routing needed, return default response
-	ctx.RequestModel = originalModel
-	return response, nil
+	// Anthropic model routing
+	if r.Config.GetModelAPIFormat(targetModel) == config.APIFormatAnthropic {
+		return r.handleAnthropicRouting(openAIRequest, originalModel, targetModel, decisionName, ctx)
+	}
+
+	// OpenAI-compatible routing
+	switch {
+	case !isAutoModel:
+		return r.handleSpecifiedModelRouting(openAIRequest, originalModel, ctx)
+	case r.shouldUseLooper(ctx.VSRSelectedDecision):
+		logging.Infof("Using Looper for decision %s with algorithm %s",
+			ctx.VSRSelectedDecision.Name, ctx.VSRSelectedDecision.Algorithm.Type)
+		return r.handleLooperExecution(ctx.TraceContext, openAIRequest, ctx.VSRSelectedDecision, ctx)
+	case selectedModel != "":
+		return r.handleAutoModelRouting(openAIRequest, originalModel, decisionName, reasoningDecision, selectedModel, ctx, response)
+	default:
+		// Auto model without selection - no routing needed
+		ctx.RequestModel = originalModel
+		return response, nil
+	}
 }
 
 // handleAutoModelRouting handles routing for auto model selection
@@ -135,26 +131,33 @@ func (r *OpenAIRouter) handleAutoModelRouting(openAIRequest *openai.ChatCompleti
 	r.recordRoutingDecision(ctx, decisionName, originalModel, matchedModel, reasoningDecision)
 
 	// Track VSR decision information
-	// categoryName is already set in ctx.VSRSelectedCategory by performDecisionEvaluationAndModelSelection
+	// categoryName is already set in ctx.VSRSelectedCategory by performDecisionEvaluation
 	r.trackVSRDecision(ctx, ctx.VSRSelectedCategory, decisionName, matchedModel, reasoningDecision.UseReasoning)
 
 	// Track model routing metrics
 	metrics.RecordModelRouting(originalModel, matchedModel)
 
 	// Select endpoint for the matched model
-	selectedEndpoint := r.selectEndpointForModel(ctx, matchedModel)
+	selectedEndpoint, selectedEndpointName, endpointErr := r.selectEndpointForModel(ctx, matchedModel)
+	if endpointErr != nil {
+		return nil, fmt.Errorf("auto routing: %w", endpointErr)
+	}
 
-	// Modify request body with new model, reasoning mode, and system prompt
-	modifiedBody, err := r.modifyRequestBodyForAutoRouting(openAIRequest, matchedModel, decisionName, reasoningDecision.UseReasoning, ctx)
+	// Resolve model name alias to real model name for the selected endpoint
+	// e.g., "qwen14b-rack1" -> "Qwen/Qwen2.5-14B-Instruct"
+	upstreamModel := r.resolveModelNameForEndpoint(matchedModel, selectedEndpointName)
+
+	// Modify request body with resolved model name, reasoning mode, and system prompt
+	modifiedBody, err := r.modifyRequestBodyForAutoRouting(openAIRequest, upstreamModel, decisionName, reasoningDecision.UseReasoning, ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create response with mutations
-	response = r.createRoutingResponse(matchedModel, selectedEndpoint, modifiedBody, ctx)
+	// Create response with mutations (use original alias for headers/tracing, upstream model in body)
+	response = r.createRoutingResponse(matchedModel, selectedEndpoint, selectedEndpointName, modifiedBody, ctx)
 
 	// Log routing decision
-	r.logRoutingDecision(ctx, "auto_routing", originalModel, matchedModel, decisionName, reasoningDecision.UseReasoning, selectedEndpoint)
+	r.logRoutingDecision(ctx, "auto_routing", originalModel, matchedModel, decisionName, reasoningDecision.UseReasoning)
 
 	// Handle route cache clearing
 	if r.shouldClearRouteCache() {
@@ -163,6 +166,9 @@ func (r *OpenAIRouter) handleAutoModelRouting(openAIRequest *openai.ChatCompleti
 
 	// Save the actual model for token tracking
 	ctx.RequestModel = matchedModel
+
+	// Capture router replay information if enabled
+	r.startRouterReplay(ctx, originalModel, matchedModel, decisionName)
 
 	// Handle tool selection
 	r.handleToolSelectionForRequest(openAIRequest, response, ctx)
@@ -180,13 +186,20 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 	// Track VSR decision information for non-auto models
 	ctx.VSRSelectedModel = originalModel
 	ctx.VSRReasoningMode = "off" // Non-auto models don't use reasoning mode by default
-	// PII policy check already done in performPIIDetection
+	// Security checks (jailbreak/PII) are handled at the signal level via fast_response plugin
+	// Memory injection already happened in handleMemoryRetrieval (before routing diverged)
 
 	// Select endpoint for the specified model
-	selectedEndpoint := r.selectEndpointForModel(ctx, originalModel)
+	selectedEndpoint, selectedEndpointName, endpointErr := r.selectEndpointForModel(ctx, originalModel)
+	if endpointErr != nil {
+		return nil, fmt.Errorf("specified model routing: %w", endpointErr)
+	}
 
-	// Create response with headers
-	response := r.createSpecifiedModelResponse(originalModel, selectedEndpoint)
+	// Resolve model name alias to real model name for the selected endpoint
+	upstreamModel := r.resolveModelNameForEndpoint(originalModel, selectedEndpointName)
+
+	// Create response with headers (and body mutation if model name changed)
+	response := r.createSpecifiedModelResponse(originalModel, upstreamModel, selectedEndpoint, selectedEndpointName, ctx)
 
 	// Handle route cache clearing
 	if r.shouldClearRouteCache() {
@@ -194,7 +207,7 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 	}
 
 	// Log routing decision
-	r.logRoutingDecision(ctx, "model_specified", originalModel, originalModel, "", false, selectedEndpoint)
+	r.logRoutingDecision(ctx, "model_specified", originalModel, originalModel, "", false)
 
 	// Save the actual model for token tracking
 	ctx.RequestModel = originalModel
@@ -208,152 +221,6 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 	return response, nil
 }
 
-// selectEndpointForModel selects the best endpoint for the given model
-func (r *OpenAIRouter) selectEndpointForModel(ctx *RequestContext, model string) string {
-	backendCtx, backendSpan := tracing.StartSpan(ctx.TraceContext, tracing.SpanBackendSelection)
-
-	endpointAddress, endpointFound := r.Config.SelectBestEndpointAddressForModel(model)
-	if endpointFound {
-		logging.Infof("Selected endpoint address: %s for model: %s", endpointAddress, model)
-
-		endpoints := r.Config.GetEndpointsForModel(model)
-		if len(endpoints) > 0 {
-			tracing.SetSpanAttributes(backendSpan,
-				attribute.String(tracing.AttrEndpointName, endpoints[0].Name),
-				attribute.String(tracing.AttrEndpointAddress, endpointAddress))
-		}
-	} else {
-		logging.Warnf("No endpoint found for model %s, using fallback", model)
-	}
-
-	backendSpan.End()
-	ctx.TraceContext = backendCtx
-
-	return endpointAddress
-}
-
-// modifyRequestBodyForAutoRouting modifies the request body for auto routing
-func (r *OpenAIRouter) modifyRequestBodyForAutoRouting(openAIRequest *openai.ChatCompletionNewParams, matchedModel string, decisionName string, useReasoning bool, ctx *RequestContext) ([]byte, error) {
-	// Modify the model in the request
-	openAIRequest.Model = matchedModel
-
-	// Serialize the modified request
-	modifiedBody, err := serializeOpenAIRequestWithStream(openAIRequest, ctx.ExpectStreamingResponse)
-	if err != nil {
-		logging.Errorf("Error serializing modified request: %v", err)
-		metrics.RecordRequestError(matchedModel, "serialization_error")
-		return nil, status.Errorf(codes.Internal, "error serializing modified request: %v", err)
-	}
-
-	if decisionName == "" {
-		return modifiedBody, nil
-	}
-	// Set reasoning mode
-	modifiedBody, err = r.setReasoningModeToRequestBody(modifiedBody, useReasoning, decisionName)
-	if err != nil {
-		logging.Errorf("Error setting reasoning mode %v to request: %v", useReasoning, err)
-		metrics.RecordRequestError(matchedModel, "serialization_error")
-		return nil, status.Errorf(codes.Internal, "error setting reasoning mode: %v", err)
-	}
-
-	// Add decision-specific system prompt if configured
-	modifiedBody, err = r.addSystemPromptIfConfigured(modifiedBody, decisionName, matchedModel, ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return modifiedBody, nil
-}
-
-// createRoutingResponse creates a routing response with mutations
-func (r *OpenAIRouter) createRoutingResponse(model string, endpoint string, modifiedBody []byte, ctx *RequestContext) *ext_proc.ProcessingResponse {
-	bodyMutation := &ext_proc.BodyMutation{
-		Mutation: &ext_proc.BodyMutation_Body{
-			Body: modifiedBody,
-		},
-	}
-
-	setHeaders := []*core.HeaderValueOption{}
-	removeHeaders := []string{"content-length"}
-
-	// Add standard routing headers
-	if endpoint != "" {
-		setHeaders = append(setHeaders, &core.HeaderValueOption{
-			Header: &core.HeaderValue{
-				Key:      headers.GatewayDestinationEndpoint,
-				RawValue: []byte(endpoint),
-			},
-		})
-	}
-	if model != "" {
-		setHeaders = append(setHeaders, &core.HeaderValueOption{
-			Header: &core.HeaderValue{
-				Key:      headers.SelectedModel,
-				RawValue: []byte(model),
-			},
-		})
-	}
-
-	// Apply header mutations from decision's header_mutation plugin
-	if ctx.VSRSelectedDecision != nil {
-		pluginSetHeaders, pluginRemoveHeaders := r.buildHeaderMutations(ctx.VSRSelectedDecision)
-		if len(pluginSetHeaders) > 0 {
-			setHeaders = append(setHeaders, pluginSetHeaders...)
-			logging.Infof("Applied %d header mutations from decision %s", len(pluginSetHeaders), ctx.VSRSelectedDecision.Name)
-		}
-		if len(pluginRemoveHeaders) > 0 {
-			removeHeaders = append(removeHeaders, pluginRemoveHeaders...)
-			logging.Infof("Applied %d header deletions from decision %s", len(pluginRemoveHeaders), ctx.VSRSelectedDecision.Name)
-		}
-	}
-
-	headerMutation := &ext_proc.HeaderMutation{
-		RemoveHeaders: removeHeaders,
-		SetHeaders:    setHeaders,
-	}
-
-	return &ext_proc.ProcessingResponse{
-		Response: &ext_proc.ProcessingResponse_RequestBody{
-			RequestBody: &ext_proc.BodyResponse{
-				Response: &ext_proc.CommonResponse{
-					Status:         ext_proc.CommonResponse_CONTINUE,
-					HeaderMutation: headerMutation,
-					BodyMutation:   bodyMutation,
-				},
-			},
-		},
-	}
-}
-
-// createSpecifiedModelResponse creates a response for specified model routing
-func (r *OpenAIRouter) createSpecifiedModelResponse(model string, endpoint string) *ext_proc.ProcessingResponse {
-	setHeaders := []*core.HeaderValueOption{}
-	if endpoint != "" {
-		setHeaders = append(setHeaders, &core.HeaderValueOption{
-			Header: &core.HeaderValue{
-				Key:      headers.GatewayDestinationEndpoint,
-				RawValue: []byte(endpoint),
-			},
-		})
-	}
-	// Set x-selected-model header for non-auto models
-	setHeaders = append(setHeaders, &core.HeaderValueOption{
-		Header: &core.HeaderValue{
-			Key:      headers.SelectedModel,
-			RawValue: []byte(model),
-		},
-	})
-
-	return &ext_proc.ProcessingResponse{
-		Response: &ext_proc.ProcessingResponse_RequestBody{
-			RequestBody: &ext_proc.BodyResponse{
-				Response: &ext_proc.CommonResponse{
-					Status: ext_proc.CommonResponse_CONTINUE,
-					HeaderMutation: &ext_proc.HeaderMutation{
-						SetHeaders: setHeaders,
-					},
-				},
-			},
-		},
-	}
-}
+// selectEndpointForModel selects the best endpoint for the given model.
+// Returns the endpoint address:port, the endpoint name, and any error.
+// Backend selection is now part of the model layer (upstream request span)

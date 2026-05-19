@@ -58,12 +58,24 @@ type ArchitectureModels struct {
 // AutoDiscoverModels automatically discovers model files in the models directory
 // Uses intelligent architecture selection: BERT > RoBERTa > ModernBERT
 func AutoDiscoverModels(modelsDir string) (*ModelPaths, error) {
+	return AutoDiscoverModelsWithRegistry(modelsDir, nil)
+}
+
+// AutoDiscoverModelsWithRegistry discovers models using mom_registry for LoRA detection
+// modelRegistry maps local paths to HuggingFace repo IDs (e.g., "models/mom-domain-classifier" -> "LLM-Semantic-Router/lora_intent_classifier_bert-base-uncased_model")
+func AutoDiscoverModelsWithRegistry(modelsDir string, modelRegistry map[string]string) (*ModelPaths, error) {
 	if modelsDir == "" {
 		modelsDir = "./models"
 	}
 
+	// Resolve symlinks to handle cases where models directory is a symlink (e.g., CI uses /mnt/models)
+	resolved, err := filepath.EvalSymlinks(modelsDir)
+	if err == nil && resolved != "" {
+		modelsDir = resolved
+	}
+
 	// Check if models directory exists
-	if _, err := os.Stat(modelsDir); os.IsNotExist(err) {
+	if _, statErr := os.Stat(modelsDir); os.IsNotExist(statErr) {
 		return nil, fmt.Errorf("models directory does not exist: %s", modelsDir)
 	}
 
@@ -78,7 +90,7 @@ func AutoDiscoverModels(modelsDir string) (*ModelPaths, error) {
 	legacyPaths := &ModelPaths{}
 
 	// Walk through the models directory to collect all models
-	err := filepath.Walk(modelsDir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(modelsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -90,21 +102,39 @@ func AutoDiscoverModels(modelsDir string) (*ModelPaths, error) {
 
 		dirName := strings.ToLower(info.Name())
 
+		// Check if this is a LoRA model by looking up in mom_registry
+		isLoRAIntent, isLORAPII, isLORASecurity := false, false, false
+		if modelRegistry != nil {
+			// Get the HuggingFace repo ID from mom_registry
+			repoID, exists := modelRegistry[path]
+			if exists {
+				repoIDLower := strings.ToLower(repoID)
+				// Check if the repo ID contains "lora_intent_classifier" or similar patterns
+				isLoRAIntent = strings.Contains(repoIDLower, "lora_intent_classifier") ||
+					strings.Contains(repoIDLower, "lora_domain_classifier")
+				isLORAPII = strings.Contains(repoIDLower, "lora_pii_detector") ||
+					strings.Contains(repoIDLower, "lora_pii_classifier")
+				isLORASecurity = strings.Contains(repoIDLower, "lora_jailbreak_classifier") ||
+					strings.Contains(repoIDLower, "lora_security_classifier")
+			}
+		}
+
 		// Collect LoRA models by architecture
+		// Use mom_registry to determine if it's a LoRA model, fallback to directory name
 		switch {
-		case strings.HasPrefix(dirName, "lora_intent_classifier"):
+		case isLoRAIntent || strings.HasPrefix(dirName, "lora_intent_classifier"):
 			arch := detectArchitectureFromPath(dirName)
 			if architectureModels[arch].Intent == "" {
 				architectureModels[arch].Intent = path
 			}
 
-		case strings.HasPrefix(dirName, "lora_pii_detector"):
+		case isLORAPII || strings.HasPrefix(dirName, "lora_pii_detector"):
 			arch := detectArchitectureFromPath(dirName)
 			if architectureModels[arch].PII == "" {
 				architectureModels[arch].PII = path
 			}
 
-		case strings.HasPrefix(dirName, "lora_jailbreak_classifier"):
+		case isLORASecurity || strings.HasPrefix(dirName, "lora_jailbreak_classifier"):
 			arch := detectArchitectureFromPath(dirName)
 			if architectureModels[arch].Security == "" {
 				architectureModels[arch].Security = path
@@ -330,8 +360,13 @@ func GetModelDiscoveryInfo(modelsDir string) map[string]interface{} {
 // AutoInitializeUnifiedClassifier attempts to auto-discover and initialize the unified classifier
 // Prioritizes LoRA models over legacy ModernBERT models
 func AutoInitializeUnifiedClassifier(modelsDir string) (*UnifiedClassifier, error) {
-	// Discover models
-	paths, err := AutoDiscoverModels(modelsDir)
+	return AutoInitializeUnifiedClassifierWithRegistry(modelsDir, nil)
+}
+
+// AutoInitializeUnifiedClassifierWithRegistry auto-discovers and initializes with mom_registry
+func AutoInitializeUnifiedClassifierWithRegistry(modelsDir string, modelRegistry map[string]string) (*UnifiedClassifier, error) {
+	// Discover models using mom_registry for LoRA detection
+	paths, err := AutoDiscoverModelsWithRegistry(modelsDir, modelRegistry)
 	if err != nil {
 		return nil, fmt.Errorf("model discovery failed: %w", err)
 	}
@@ -428,9 +463,12 @@ func initializeLegacyUnifiedClassifier(paths *ModelPaths) (*UnifiedClassifier, e
 			return nil, fmt.Errorf("failed to load jailbreak mapping from %s: %w", securityMappingPath, loadErr2)
 		}
 		// Extract labels from jailbreak mapping (ordered by index)
-		securityLabels = make([]string, len(jailbreakMapping.IdxToLabel))
-		for i := 0; i < len(jailbreakMapping.IdxToLabel); i++ {
-			if label, exists := jailbreakMapping.IdxToLabel[fmt.Sprintf("%d", i)]; exists {
+		// Use GetJailbreakTypeCount() to support both naming conventions
+		numLabels := jailbreakMapping.GetJailbreakTypeCount()
+		securityLabels = make([]string, numLabels)
+		for i := 0; i < numLabels; i++ {
+			// Use GetJailbreakTypeFromIndex() to support both naming conventions
+			if label, exists := jailbreakMapping.GetJailbreakTypeFromIndex(i); exists {
 				securityLabels[i] = label
 			} else {
 				return nil, fmt.Errorf("missing security label for index %d", i)

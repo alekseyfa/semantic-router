@@ -3,6 +3,7 @@ package testcases
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,9 @@ import (
 	pkgtestcases "github.com/vllm-project/semantic-router/e2e/pkg/testcases"
 	"k8s.io/client-go/kubernetes"
 )
+
+//go:embed testdata/plugin_chain_cases.json
+var pluginChainTestData embed.FS
 
 func init() {
 	pkgtestcases.Register("plugin-chain-execution", pkgtestcases.TestCase{
@@ -23,12 +27,27 @@ func init() {
 
 // PluginChainCase represents a test case for plugin chain execution
 type PluginChainCase struct {
+	Description         string   `json:"description"`
 	Query               string   `json:"query"`
 	ExpectPIIBlock      bool     `json:"expect_pii_block"`
 	ExpectCacheUsed     bool     `json:"expect_cache_used"`
 	ExpectPromptApplied bool     `json:"expect_prompt_applied"`
-	Description         string   `json:"description"`
 	PIITypes            []string `json:"pii_types"` // Expected PII types detected
+}
+
+// loadPluginChainCases loads test cases from the embedded JSON file
+func loadPluginChainCases() ([]PluginChainCase, error) {
+	data, err := pluginChainTestData.ReadFile("testdata/plugin_chain_cases.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plugin chain cases: %w", err)
+	}
+
+	var cases []PluginChainCase
+	if err := json.Unmarshal(data, &cases); err != nil {
+		return nil, fmt.Errorf("failed to parse plugin chain cases: %w", err)
+	}
+
+	return cases, nil
 }
 
 // PluginChainResult tracks the result of a single plugin chain test
@@ -58,38 +77,14 @@ func testPluginChainExecution(ctx context.Context, client *kubernetes.Clientset,
 	}
 	defer stopPortForward()
 
-	// Define test cases
-	testCases := []PluginChainCase{
-		{
-			Query:               "My social security number is 123-45-6789",
-			ExpectPIIBlock:      true,
-			ExpectCacheUsed:     false, // PII blocks before cache
-			ExpectPromptApplied: false, // PII blocks before prompt
-			Description:         "PII (SSN) should block entire plugin chain",
-			PIITypes:            []string{"US_SSN"},
-		},
-		{
-			Query:               "Contact me at john.doe@example.com",
-			ExpectPIIBlock:      true,
-			ExpectCacheUsed:     false,
-			ExpectPromptApplied: false,
-			Description:         "PII (EMAIL) should block entire plugin chain",
-			PIITypes:            []string{"EMAIL"},
-		},
-		{
-			Query:               "What is 5 + 7?",
-			ExpectPIIBlock:      false,
-			ExpectCacheUsed:     false, // First request, cache miss
-			ExpectPromptApplied: true,  // Should apply math expert prompt
-			Description:         "Clean query should pass PII and apply prompt",
-		},
-		{
-			Query:               "Tell me about photosynthesis",
-			ExpectPIIBlock:      false,
-			ExpectCacheUsed:     false,
-			ExpectPromptApplied: true,
-			Description:         "Biology query should pass PII plugin",
-		},
+	// Load test cases from JSON file
+	testCases, err := loadPluginChainCases()
+	if err != nil {
+		return fmt.Errorf("failed to load test cases: %w", err)
+	}
+
+	if opts.Verbose {
+		fmt.Printf("[Test] Loaded %d test cases from testdata/plugin_chain_cases.json\n", len(testCases))
 	}
 
 	// Run plugin chain tests
@@ -179,10 +174,30 @@ func testSinglePluginChain(ctx context.Context, testCase PluginChainCase, localP
 
 	result.StatusCode = resp.StatusCode
 
-	// Extract plugin execution headers
+	// Extract plugin execution headers (signal-driven architecture)
+	// When PII is detected and blocked, fast_response returns ImmediateResponse with:
+	//   x-vsr-fast-response: true
+	//   x-vsr-selected-decision: <decision-name>
+	// Note: x-vsr-matched-pii is only set in the response header phase (non-blocking path),
+	// it is NOT present in fast_response ImmediateResponse.
+	fastResponseHeader := resp.Header.Get("x-vsr-fast-response")
+	matchedPIIHeader := resp.Header.Get("x-vsr-matched-pii") // only in non-blocking path
+	// Legacy header fallback for backward compatibility
 	piiViolationHeader := resp.Header.Get("x-vsr-pii-violation")
-	result.PIIDetected = piiViolationHeader // Store for display purposes
-	result.PIIBlocked = (resp.StatusCode == http.StatusForbidden || piiViolationHeader == "true")
+	piiTypesHeader := resp.Header.Get("x-vsr-pii-types")
+
+	if matchedPIIHeader != "" {
+		result.PIIDetected = matchedPIIHeader // Non-blocking path header
+	} else if piiTypesHeader != "" {
+		result.PIIDetected = piiTypesHeader // Legacy fallback
+	} else {
+		result.PIIDetected = piiViolationHeader // Legacy boolean fallback
+	}
+	// PII is blocked when: fast_response was triggered (ImmediateResponse),
+	// or legacy headers present
+	result.PIIBlocked = fastResponseHeader == "true" ||
+		resp.StatusCode == http.StatusForbidden ||
+		piiViolationHeader == "true"
 
 	// Check cache headers (x-vsr-cache-hit or similar)
 	cacheHeader := resp.Header.Get("x-vsr-cache-hit")

@@ -260,6 +260,7 @@ While vLLM Semantic Router works well for experimental deployments, production a
 **The Deliverables**
 
 #### Helm Chart Support
+
 Professional Kubernetes deployment with:
 
 - Templated manifests for all resources
@@ -268,6 +269,7 @@ Professional Kubernetes deployment with:
 - Best practices for security, scaling, and resource management
 
 #### Modern Management Dashboard
+
 A comprehensive web-based control plane featuring:
 
 - **Visual Route Builder**: Drag-and-drop interface for creating SemanticRoute configurations
@@ -293,12 +295,6 @@ Deep integration with the vLLM Production Stack will enable seamless model servi
 [llm-d](https://llm-d.ai/) is a Kubernetes-native high-performance distributed LLM inference framework built on vLLM. Founded by Red Hat, Google Cloud, CoreWeave, and IBM Research, with contributions from NVIDIA, Hugging Face, Intel, Lambda, and Mistral AI, llm-d provides well-lit paths for anyone to serve large generative AI models at scale with distributed inference capabilities.
 
 Integration with llm-d will bring intelligent semantic routing to Kubernetes-native distributed inference deployments. This partnership will enable llm-d users to leverage MoM models and fusion routing for efficient model selection across distributed inference clusters, optimizing resource utilization and performance in cloud-native environments.
-
-### HuggingChat
-
-[HuggingChat](https://huggingface.co/chat/) is Hugging Face's open-source conversational AI platform powered by state-of-the-art open models. It democratizes access to advanced AI chat capabilities without requiring API keys or paid subscriptions.
-
-Integration with HuggingChat will bring intelligent semantic routing to conversational AI applications. This partnership will enable HuggingChat users to leverage MoM models and fusion routing capabilities, providing cost-effective and high-performance model selection for chat-based workloads.
 
 ### NVIDIA Dynamo
 

@@ -1,5 +1,5 @@
 bert_model:
-  model_id: models/all-MiniLM-L12-v2
+  model_id: models/mom-embedding-light
   threshold: 0.6
   use_cpu: true
 
@@ -20,11 +20,11 @@ tools:
 
 prompt_guard:
   enabled: true
-  use_modernbert: true
-  model_id: "models/jailbreak_classifier_modernbert-base_model"
+  use_modernbert: false
+  model_id: "models/mom-jailbreak-classifier"
   threshold: 0.7
   use_cpu: true
-  jailbreak_mapping_path: "models/jailbreak_classifier_modernbert-base_model/jailbreak_type_mapping.json"
+  jailbreak_mapping_path: "models/mom-jailbreak-classifier/jailbreak_type_mapping.json"
 
 vllm_endpoints:
   - name: "mock"

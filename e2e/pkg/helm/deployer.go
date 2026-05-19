@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,8 +28,16 @@ func NewDeployer(kubeConfig string, verbose bool) *Deployer {
 func (d *Deployer) Install(ctx context.Context, opts InstallOptions) error {
 	d.log("Installing Helm chart: %s/%s", opts.Namespace, opts.ReleaseName)
 
+	chart, cleanup, err := d.prepareLocalChartWithDeps(ctx, opts.Chart)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	args := []string{
-		"install", opts.ReleaseName, opts.Chart,
+		"install", opts.ReleaseName, chart,
 		"--namespace", opts.Namespace,
 		"--create-namespace",
 		"--kubeconfig", d.KubeConfig,
@@ -66,6 +76,90 @@ func (d *Deployer) Install(ctx context.Context, opts InstallOptions) error {
 	return nil
 }
 
+func (d *Deployer) prepareLocalChartWithDeps(ctx context.Context, chartRef string) (string, func(), error) {
+	// Remote charts (oci://, http(s)://, repo/chart) are handled by Helm directly.
+	if strings.Contains(chartRef, "://") {
+		return chartRef, nil, nil
+	}
+
+	stat, err := os.Stat(chartRef)
+	if err != nil || !stat.IsDir() {
+		// Not a local directory; let Helm handle it.
+		return chartRef, nil, nil
+	}
+
+	// Copy the chart to a temp dir so dependency build doesn't dirty the working tree.
+	tmpDir, err := os.MkdirTemp("", "semantic-router-helm-chart-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp dir for chart copy: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+
+	tmpChart := filepath.Join(tmpDir, "chart")
+	if err := copyDir(chartRef, tmpChart); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to copy chart to temp dir: %w", err)
+	}
+
+	// Build dependencies for local chart (creates charts/ and Chart.lock in temp copy).
+	cmd := exec.CommandContext(ctx, "helm", "dependency", "build", tmpChart)
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to build chart dependencies: %w", err)
+	}
+
+	return tmpChart, cleanup, nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+
+		// Copy file contents
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+
+		if _, err := out.ReadFrom(in); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // Uninstall uninstalls a Helm release
 func (d *Deployer) Uninstall(ctx context.Context, releaseName, namespace string) error {
 	d.log("Uninstalling Helm release: %s/%s", namespace, releaseName)
@@ -94,11 +188,13 @@ func (d *Deployer) WaitForDeployment(ctx context.Context, namespace, deploymentN
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Convert timeout to seconds for kubectl
+	timeoutSeconds := int(timeout.Seconds())
 	cmd := exec.CommandContext(ctx, "kubectl", "wait",
 		"--for=condition=Available",
 		fmt.Sprintf("deployment/%s", deploymentName),
 		"-n", namespace,
-		"--timeout=600s",
+		fmt.Sprintf("--timeout=%ds", timeoutSeconds),
 		"--kubeconfig", d.KubeConfig)
 
 	if d.Verbose {

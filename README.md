@@ -7,8 +7,9 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/candle-semantic-router.svg)](https://crates.io/crates/candle-semantic-router)
 ![Test And Build](https://github.com/vllm-project/semantic-router/workflows/Test%20And%20Build/badge.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/semantic-router)
 
-**📚 [Complete Documentation](https://vllm-semantic-router.com) | 🚀 [Quick Start](https://vllm-semantic-router.com/docs/installation) | 📣 [Blog](https://vllm-semantic-router.com/blog/) | 📖 [Publications](https://vllm-semantic-router.com/publications/)**
+**🎯 [Playground](https://play.vllm-semantic-router.com) | 📚 [Website](https://vllm-semantic-router.com) | 🚀 [Quick Start](https://vllm-semantic-router.com/docs/installation) | 📣 [Blog](https://vllm-semantic-router.com/blog/) | 📖 [Publications](https://vllm-semantic-router.com/publications/)**
 
 </div>
 
@@ -16,111 +17,140 @@
 
 *Latest News* 🔥
 
-- [2025/11/03] **Our paper** [Category-Aware Semantic Caching for Heterogeneous LLM Workloads](https://arxiv.org/abs/2510.26835) published 📝
-- [2025/10/26] We reached 2000 stars on GitHub! 🔥
-- [2025/10/21] We announced the [2025 Q4 Roadmap: Journey to Iris](https://vllm-semantic-router.com/blog/q4-roadmap-iris) 📅.
-- [2025/10/16] We established the [vLLM Semantic Router Youtube Channel](https://www.youtube.com/@vLLMSemanticRouter) ✨.
-- [2025/10/15] We announced the [vLLM Semantic Router Dashboard](https://www.youtube.com/watch?v=E2IirN8PsFw) 🚀.
-- [2025/10/12] **Our paper** [When to Reason: Semantic Router for vLLM](https://arxiv.org/abs/2510.08731) accepted by NeurIPS 2025 MLForSys 🧠.
-- [2025/10/08] We announced the integration with [vLLM Production Stack](https://github.com/vllm-project/production-stack) Team 👋.
-- [2025/10/01] We supported to deploy on [Kubernetes](https://vllm-semantic-router.com/docs/installation/k8s/ai-gateway) 🌊.
-- [2025/09/15] We reached 1000 stars on GitHub! 🔥
-- [2025/09/01] We released the project officially: [vLLM Semantic Router: Next Phase in LLM inference](https://blog.vllm.ai/2025/09/11/semantic-router.html) 🚀.
+- [2026/02/27] White Paper Released: [Signal Driven Decision Routing for Mixture-of-Modality Models](https://vllm-semantic-router.com/white-paper/)
+- [2026/02/02] New SOTA on [RouterArena](https://routeworks.github.io) (ICLR 2026): best overall score, Rank #1
+- [2026/01/05] Iris v0.1 is Released: [vLLM Semantic Router v0.1 Iris: The First Major Release](https://blog.vllm.ai/2026/01/05/vllm-sr-iris.html)
+- [2025/12/16] Collaboration: [AMD × vLLM Semantic Router: Building the System Intelligence Together](https://blog.vllm.ai/2025/12/16/vllm-sr-amd.html)
+- [2025/12/15] New Blog: [Token-Level Truth: Real-Time Hallucination Detection for Production LLMs](https://blog.vllm.ai/2025/12/14/halugate.html)
+- [2025/11/19] New Blog: [Signal-Decision Driven Architecture: Reshaping Semantic Routing at Scale](https://blog.vllm.ai/2025/11/19/signal-decision.html)
+- [2025/11/03] Our paper [Category-Aware Semantic Caching for Heterogeneous LLM Workloads](https://arxiv.org/abs/2510.26835) published
+- [2025/10/27] New Blog: [Scaling Semantic Routing with Extensible LoRA](https://blog.vllm.ai/2025/10/27/semantic-router-modular.html)
+- [2025/10/12] Our paper [When to Reason: Semantic Router for vLLM](https://arxiv.org/abs/2510.08731) accepted by NeurIPS 2025 MLForSys.
+- [2025/10/08] Collaboration: vLLM Semantic Router with [vLLM Production Stack](https://github.com/vllm-project/production-stack) Team.
+- [2025/09/01] Released the project: [vLLM Semantic Router: Next Phase in LLM inference](https://blog.vllm.ai/2025/09/11/semantic-router.html).
 
 ---
 
-## Innovations ✨
+## Goals
+
+We are building the **System Level Intelligence** for Mixture-of-Models (MoM), bringing the **Collective Intelligence** into **LLM systems**, answering the following questions:
+
+1. How to capture the missing signals in request, response and context?
+2. How to combine the signals to make better decisions?
+3. How to collaborate more efficiently between different models?
+4. How to secure the real world and LLM system from jailbreaks, pii leaks, hallucinations?
+5. How to collect the valuable signals and build a self-learning system?
+
+![vLLM Semantic Router Banner](./website/static/img/banner.png)
+
+### Where it lives
+
+It lives between the real world and models:
+
+![level](./website/static/img/level.png)
+
+### Architecture
+
+A quick overview of the current architecture:
 
 ![architecture](./website/static/img/architecture.png)
 
-### Intelligent Routing 🧠
+## Quick Start
 
-#### Auto-Selection of Models and LoRA Adapters
+### Installation
 
-An **Mixture-of-Models** (MoM) router that intelligently directs OpenAI API requests to the most suitable models or LoRA adapters from a defined pool based on **Semantic Understanding** of the request's intent (Complexity, Task, Tools).
-
-![mom-overview](./website/static/img/mom-overview.png)
-
-Conceptually similar to Mixture-of-Experts (MoE) which lives *within* a model, this system selects the best *entire model* for the nature of the task.
-
-As such, the overall inference accuracy is improved by using a pool of models that are better suited for different types of tasks:
-
-![Model Accuracy](./website/static/img/category_accuracies.png)
-
-The router is implemented in two ways:
-
-- Golang (with Rust FFI based on the [candle](https://github.com/huggingface/candle) rust ML framework)
-- Python
-Benchmarking will be conducted to determine the best implementation.
-
-#### Request Flow
-
-![architecture](./website/static/img/flow.png)
-
-#### Auto-Selection of Tools
-
-Select the tools to use based on the prompt, avoiding the use of tools that are not relevant to the prompt so as to reduce the number of prompt tokens and improve tool selection accuracy by the LLM.
-
-#### Domain Aware System Prompts
-
-Automatically inject specialized system prompts based on query classification, ensuring optimal model behavior for different domains (math, coding, business, etc.) without manual prompt engineering.
-
-#### Domain Aware Similarity Caching ⚡️
-
-Cache the semantic representation of the prompt so as to reduce the number of prompt tokens and improve the overall inference latency.
-
-### Enterprise Security 🔒
-
-#### PII detection
-
-Detect PII in the prompt, avoiding sending PII to the LLM so as to protect the privacy of the user.
-
-#### Prompt guard
-
-Detect if the prompt is a jailbreak prompt, avoiding sending jailbreak prompts to the LLM so as to prevent the LLM from misbehaving. Can be configured globally or at the category level for fine-grained security control.
-
-### vLLM Semantic Router Dashboard 💬
-
-Watch the quick demo of the dashboard below:
-
-<div align="center">
-<a href="https://www.youtube.com/watch?v=E2IirN8PsFw">
-  <img src="https://img.youtube.com/vi/E2IirN8PsFw/maxresdefault.jpg" alt="vLLM Semantic Router Dashboard" width="90%">
-</a>
-</div>
-
-## Quick Start 🚀
-
-Get up and running in seconds with our interactive setup script:
+> [!TIP]
+> We recommend that you setup a Python virtual environment to manage dependencies.
 
 ```bash
-bash ./scripts/quickstart.sh
+$ python -m venv vsr
+$ source vsr/bin/activate
+$ pip install vllm-sr
 ```
 
-This command will:
+Installed successfully if you see the following help message:
 
-- 🔍 Check all prerequisites automatically
-- 📦 Install HuggingFace CLI if needed
-- 📥 Download all required AI models (~1.5GB)
-- 🐳 Start all Docker services
-- ⏳ Wait for services to become healthy
-- 🌐 Show you all the endpoints and next steps
+```bash
+$ vllm-sr
 
-For detailed installation and configuration instructions, see the [Complete Documentation](https://vllm-semantic-router.com/docs/installation/).
+       _ _     __  __       ____  ____
+__   _| | |_ _|  \/  |     / ___||  _ \
+\ \ / / | | | | |\/| |_____\___ \| |_) |
+ \ V /| | | |_| | |  |_____|___) |  _ <
+  \_/ |_|_|\__,_|_|  |     |____/|_| \_\
+
+vLLM Semantic Router - Intelligent routing for vLLM
+
+Usage: vllm-sr [OPTIONS] COMMAND [ARGS]...
+
+  vLLM Semantic Router CLI - Intelligent routing and caching for vLLM
+  endpoints.
+
+Options:
+  --version  Show version and exit.
+  --help     Show this message and exit.
+
+Commands:
+  config  Print generated configuration.
+  init    Initialize vLLM Semantic Router configuration.
+  dashboard  Launch the vLLM Semantic Router dashboard.
+  logs    Show logs from vLLM Semantic Router service.
+  serve   Start vLLM Semantic Router.
+  status  Show status of vLLM Semantic Router services.
+  stop    Stop vLLM Semantic Router.
+```
+
+> [!TIP]
+> You can specify the HF_ENDPOINT, HF_TOKEN, and HF_HOME environment variables to configure the Hugging Face credentials.
+
+```bash
+# Set environment variables (optional)
+export HF_ENDPOINT=https://huggingface.co  # Or use mirror: https://hf-mirror.com
+export HF_TOKEN=your_token_here  # Only for gated models
+export HF_HOME=/path/to/cache  # Optional: custom cache directory
+
+# Start the service - models download automatically
+# Environment variables are automatically passed to the container
+vllm-sr serve
+```
+
+### Configuration
+
+**File Descriptor Limits**: The CLI automatically sets file descriptor limits to 65,536 for Envoy proxy. For custom limits:
+
+```bash
+export VLLM_SR_NOFILE_LIMIT=100000  # Optional: custom limit (min: 8192)
+vllm-sr serve
+```
+
+See the [vllm-sr README](src/vllm-sr/README.md#configuration) for detailed configuration options and troubleshooting.
 
 ## Documentation 📖
 
 For comprehensive documentation including detailed setup instructions, architecture guides, and API references, visit:
 
-**👉 [Complete Documentation at Read the Docs](https://vllm-semantic-router.com/)**
+Complete Documentation at Read the **[Docs](https://vllm-semantic-router.com/)**
 
 The documentation includes:
 
 - **[Installation Guide](https://vllm-semantic-router.com/docs/installation/)** - Complete setup instructions
-- **[System Architecture](https://vllm-semantic-router.com/docs/overview/architecture/system-architecture/)** - Technical deep dive
+- **[System Architecture](https://vllm-semantic-router.com/docs/intro/#architecture-overview)** - Technical deep dive
 - **[Model Training](https://vllm-semantic-router.com/docs/training/training-overview/)** - How classification models work
 - **[API Reference](https://vllm-semantic-router.com/docs/api/router/)** - Complete API documentation
-- **[Dashboard](https://vllm-semantic-router.com/docs/overview/dashboard)** - vLLM Semantic Router Dashboard
+
+## Contributor Harness
+
+For repository-specific development and agent workflow rules, start with [AGENTS.md](AGENTS.md) and the indexed harness docs in [docs/agent/README.md](docs/agent/README.md).
+If the desired architecture and the current implementation still diverge after your change, record the durable gap in the debt entry set indexed from [docs/agent/tech-debt/README.md](docs/agent/tech-debt/README.md).
+
+Use the shared entrypoints:
+
+```bash
+make agent-scorecard
+make agent-report ENV=cpu CHANGED_FILES="path/one,path/two"
+make agent-ci-gate CHANGED_FILES="path/one,path/two"
+make agent-feature-gate ENV=cpu CHANGED_FILES="path/one,path/two"
+```
 
 ## Community 👋
 
@@ -160,3 +190,19 @@ If you find Semantic Router helpful in your research or projects, please conside
 We opened the project at Aug 31, 2025. We love open source  and collaboration ❤️
 
 [![Star History Chart](https://api.star-history.com/svg?repos=vllm-project/semantic-router&type=Date)](https://www.star-history.com/#vllm-project/semantic-router&Date)
+
+## Sponsors 👋
+
+We are grateful to our sponsors who support us:
+
+---
+
+[**AMD**](https://www.amd.com) provides us with GPU resources and [ROCm™](https://www.amd.com/en/products/software/rocm.html) Software for training and researching the frontier router models, enhancing e2e testing, and building online models playground.
+
+<div align="center">
+<a href="https://www.amd.com">
+  <img src="website/static/img/amd-logo.svg" alt="AMD" width="40%"/>
+</a>
+</div>
+
+---

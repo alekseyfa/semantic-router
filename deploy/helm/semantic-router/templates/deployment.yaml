@@ -26,60 +26,21 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- $registry := trimSuffix "/" (default "" .Values.global.imageRegistry) }}
+      {{- $prefix := ternary "" (printf "%s/" $registry) (eq $registry "") }}
       serviceAccountName: {{ include "semantic-router.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.initContainer.enabled }}
-      initContainers:
-      - name: model-downloader
-        image: {{ .Values.initContainer.image }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 10 }}
-        command: ["/bin/bash", "-c"]
-        args:
-        - |
-          set -e
-          echo "Installing Hugging Face Hub..."
-          pip install -U --no-cache-dir "huggingface_hub>=0.19.0"
-
-          echo "Downloading models to persistent volume..."
-          cd /app/models
-
-          {{- range .Values.initContainer.models }}
-          # Download {{ .name }}
-          echo "Downloading {{ .name }} from {{ .repo }}..."
-          # Remove .cache directory to ensure fresh download
-          rm -rf "{{ .name }}/.cache" 2>/dev/null || true
-          # Download with ignore_patterns to exclude ONNX-only files if pytorch model exists
-          python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ .repo }}', local_dir='{{ .name }}', ignore_patterns=['*.onnx', '*.msgpack', '*.h5', '*.tflite'] if '{{ .name }}' == 'all-MiniLM-L12-v2' else None)"
-
-          # Check for required model files
-          echo "Checking {{ .name }} for required files:"
-          if [ -f "{{ .name }}/pytorch_model.bin" ] || [ -f "{{ .name }}/model.safetensors" ]; then
-            echo "✓ Found PyTorch model weights in {{ .name }}"
-          else
-            echo "✗ WARNING: No PyTorch model weights found in {{ .name }}"
-            ls -la "{{ .name }}/" | head -20
-          fi
-
-          {{- end }}
-          echo "All models downloaded successfully!"
-          ls -la /app/models/
-        env:
-        - name: HF_HUB_CACHE
-          value: /tmp/hf_cache
-          {{- with .Values.initContainer.env }}
-          {{- toYaml . | nindent 10 }}
-          {{- end }}
-        resources:
-          {{- toYaml .Values.initContainer.resources | nindent 10 }}
-        volumeMounts:
-        - name: models-volume
-          mountPath: /app/models
-      {{- end }}
+      # Models are now automatically downloaded by the router at startup
+      # No initContainer is needed - the router uses its built-in Go-based
+      # modeldownload package to download models from HuggingFace based on
+      # the mom_registry configuration in config.yaml
+      # Note: HF_TOKEN secret (hf-token-secret) is still required for downloading
+      # gated models (e.g., embeddinggemma-300m). The E2E framework creates this
+      # secret automatically if HF_TOKEN is available in the test environment.
       containers:
       - name: {{ .Chart.Name }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        image: "{{ $prefix }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         {{- with .Values.args }}
         args:
@@ -105,9 +66,21 @@ spec:
         - name: config-volume
           mountPath: /app/config
           readOnly: true
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- if .Values.persistence.enabled }}
         - name: models-volume
           mountPath: /app/models
+        {{- end }}
+        {{- if .Values.startupProbe.enabled }}
+        # Startup probe for slow-starting containers (model loading takes ~60s with Gemma)
+        startupProbe:
+          tcpSocket:
+            port: {{ .Values.service.grpc.targetPort }}
+          periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.startupProbe.failureThreshold }}
         {{- end }}
         {{- if .Values.livenessProbe.enabled }}
         livenessProbe:
@@ -137,6 +110,9 @@ spec:
       - name: models-volume
         persistentVolumeClaim:
           claimName: {{ include "semantic-router.pvcName" . }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

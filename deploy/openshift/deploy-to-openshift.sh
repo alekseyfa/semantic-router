@@ -13,6 +13,9 @@ NC='\033[0m'
 NAMESPACE="vllm-semantic-router-system"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_OBSERVABILITY=true
+USE_SIMULATOR=false
+USE_KSERVE=false
+USE_CLASSIFIER_GPU=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -21,14 +24,31 @@ while [[ $# -gt 0 ]]; do
             DEPLOY_OBSERVABILITY=false
             shift
             ;;
+        --simulator)
+            USE_SIMULATOR=true
+            shift
+            ;;
+        --kserve)
+            USE_KSERVE=true
+            shift
+            ;;
+        --classifier-gpu)
+            USE_CLASSIFIER_GPU=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --simulator           Use mock-vllm simulator instead of llm-katan (no GPU required)"
+            echo "  --kserve              Deploy semantic-router with a KServe backend (use --simulator for KServe sim)"
+            echo "  --classifier-gpu      Run semantic router classifier on GPU"
             echo "  --no-observability    Skip deploying dashboard, OpenWebUI, Grafana, and Prometheus"
             echo "  --help, -h            Show this help message"
             echo ""
-            echo "By default, deploys the full stack including observability components."
+            echo "By default, deploys the full stack with llm-katan (requires GPU)."
+            echo "Use --simulator for CPU-only clusters without GPUs."
+            echo "Use --classifier-gpu with --simulator to run classifier on GPU but vLLM models on CPU."
             exit 0
             ;;
         *)
@@ -64,39 +84,229 @@ fi
 
 success "Logged in as $(oc whoami)"
 
+
+if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+    if ! command -v yq >/dev/null 2>&1; then
+        error "yq is required for --classifier-gpu. Install mikefarah/yq and retry."
+        exit 1
+    fi
+fi
+
+# GPU mode (--kserve without --simulator) requires GPU resources
+# Simulator mode (--kserve --simulator) works without GPU
+# --classifier-gpu requires GPU resources (can be used with or without --simulator)
+
 # Create namespace
 log "Creating namespace: $NAMESPACE"
 oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
+for i in {1..30}; do
+    if oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null | grep -q .; then
+        warn "Namespace $NAMESPACE is terminating, waiting..."
+        sleep 2
+        continue
+    fi
+    break
+done
 success "Namespace ready"
 
-# Build llm-katan image if needed
-log "Checking for llm-katan image..."
-if ! oc get imagestream llm-katan -n "$NAMESPACE" &> /dev/null; then
-    log "Building llm-katan image..."
+# KServe mode: deploy LLMInferenceService and semantic-router
+if [[ "$USE_KSERVE" == "true" ]]; then
+    KSERVE_SCRIPT="$SCRIPT_DIR/../kserve/deploy.sh"
+    KSERVE_INSTALL_SCRIPT="$SCRIPT_DIR/../kserve/install-kserve.sh"
 
-    if [[ -f "$SCRIPT_DIR/Dockerfile.llm-katan" ]]; then
-        oc new-build --dockerfile - --name llm-katan -n "$NAMESPACE" < "$SCRIPT_DIR/Dockerfile.llm-katan"
-    else
-        error "Dockerfile.llm-katan not found at: $SCRIPT_DIR/Dockerfile.llm-katan"
+    if [[ ! -x "$KSERVE_SCRIPT" ]]; then
+        error "KServe deploy script not found: $KSERVE_SCRIPT"
         exit 1
     fi
 
-    log "Waiting for build to start..."
-    sleep 5
-
-    log "Starting build..."
-    oc start-build llm-katan -n "$NAMESPACE" --follow || true
-
-    log "Waiting for build to complete..."
-    if ! oc wait --for=condition=Complete build/llm-katan-1 -n "$NAMESPACE" --timeout=600s 2>/dev/null; then
-        warn "Build may still be in progress. Checking status..."
-        oc get builds -n "$NAMESPACE"
-        oc logs build/llm-katan-1 -n "$NAMESPACE" --tail=50 || true
+    if [[ ! -x "$KSERVE_INSTALL_SCRIPT" ]]; then
+        error "KServe install script not found: $KSERVE_INSTALL_SCRIPT"
+        exit 1
     fi
 
-    success "llm-katan image built"
+    log "Installing KServe and LLMInferenceService CRDs..."
+    "$KSERVE_INSTALL_SCRIPT"
+
+    # Ensure LLMInferenceServiceConfig templates exist before creating LLMInferenceServices
+    if oc get crd llminferenceserviceconfigs.serving.kserve.io &>/dev/null; then
+        if ! oc get llminferenceserviceconfig kserve-config-llm-template -n kserve &>/dev/null; then
+            log "Applying LLMInferenceServiceConfig templates..."
+            if [[ -d /home/ubuntu/tmp/kserve/config/llmisvcconfig ]]; then
+                for f in /home/ubuntu/tmp/kserve/config/llmisvcconfig/config-llm-*.yaml; do
+                    oc apply -n kserve -f "$f" 2>/dev/null || true
+                done
+            else
+                warn "Local kserve repo not found at /home/ubuntu/tmp/kserve; LLMInferenceServiceConfig templates may be missing."
+            fi
+        fi
+    fi
+
+    # Wait briefly for llmisvc controller and webhook to settle before creating LLMInferenceServices
+    oc wait --for=condition=Available deployment/llmisvc-controller-manager -n kserve --timeout=3m 2>/dev/null || true
+    for i in {1..30}; do
+        ENDPOINTS=$(oc get endpoints llmisvc-webhook-server-service -n kserve -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
+        if [[ -n "$ENDPOINTS" ]]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if [[ "$USE_SIMULATOR" == "true" ]]; then
+        # Simulator mode: deploy LLMInferenceServices for Model-A and Model-B
+        SIM_ISVC_A="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-llm-d-sim-model-a.yaml"
+        SIM_ISVC_B="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-llm-d-sim-model-b.yaml"
+
+        if [[ ! -f "$SIM_ISVC_A" || ! -f "$SIM_ISVC_B" ]]; then
+            error "Simulator LLMInferenceService manifests not found."
+            exit 1
+        fi
+
+        log "Ensuring simulator service account and SCC..."
+        oc create serviceaccount llmisvc-workload -n "$NAMESPACE" 2>/dev/null || true
+        oc adm policy add-scc-to-user anyuid -z llmisvc-workload -n "$NAMESPACE" 2>/dev/null || true
+        oc adm policy add-scc-to-user privileged -z llmisvc-workload -n "$NAMESPACE" 2>/dev/null || true
+        oc adm policy add-scc-to-user privileged system:serviceaccount:kserve:llmisvc-controller-manager -n "$NAMESPACE" 2>/dev/null || true
+
+        log "Deploying simulator LLMInferenceServices..."
+        oc apply -n "$NAMESPACE" -f "$SIM_ISVC_A"
+        oc apply -n "$NAMESPACE" -f "$SIM_ISVC_B"
+
+        log "Waiting for simulator LLMInferenceServices to be ready..."
+        oc wait --for=condition=Ready llminferenceservice/model-a -n "$NAMESPACE" --timeout=10m
+        oc wait --for=condition=Ready llminferenceservice/model-b -n "$NAMESPACE" --timeout=10m
+
+        KSERVE_ARGS=(--simulator -n "$NAMESPACE")
+    else
+        # GPU mode: deploy real Qwen model on GPU
+        QWEN_LLMISVC="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-qwen-0.6b-gpu.yaml"
+
+        if [[ ! -f "$QWEN_LLMISVC" ]]; then
+            error "Qwen LLMInferenceService manifest not found: $QWEN_LLMISVC"
+            exit 1
+        fi
+
+        # Check for GPU resources
+        GPU_NODES=$(oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '<none>' -c)
+        if [[ "$GPU_NODES" -eq 0 ]]; then
+            warn "No GPU resources detected. Install GPU operator first:"
+            warn "  ./deploy/kserve/install-gpu-operator.sh"
+            error "GPU required for non-simulator KServe deployment"
+            exit 1
+        fi
+        log "Found $GPU_NODES node(s) with GPU resources"
+
+        log "Granting privileged SCC to default service account for model download..."
+        oc adm policy add-scc-to-user privileged -z default -n "$NAMESPACE" 2>/dev/null || true
+
+        log "Deploying Qwen 0.6B LLMInferenceService on GPU..."
+        for i in {1..3}; do
+            if oc apply -n "$NAMESPACE" -f "$QWEN_LLMISVC"; then
+                break
+            fi
+            warn "Failed to apply Qwen LLMInferenceService (attempt $i); retrying..."
+            sleep 5
+        done
+
+        log "Waiting for Qwen LLMInferenceService to be ready (this may take several minutes for model download)..."
+        oc wait --for=condition=Ready llminferenceservice/qwen-0-6b -n "$NAMESPACE" --timeout=15m
+
+        KSERVE_ARGS=(-n "$NAMESPACE" --inferenceservice qwen-0-6b --model "Qwen/Qwen3-0.6B")
+    fi
+
+    if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+        GPU_NODES=$(oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '<none>' -c)
+        if [[ "$GPU_NODES" -eq 0 ]]; then
+            warn "No GPU resources detected. Install GPU operator first:"
+            warn "  ./deploy/kserve/install-gpu-operator.sh"
+            error "GPU required for --classifier-gpu deployment"
+            exit 1
+        fi
+        log "Found $GPU_NODES node(s) with GPU resources for semantic router classifier"
+        KSERVE_ARGS+=(--classifier-gpu)
+    fi
+
+    log "KServe mode: Deploying semantic-router with KServe backend..."
+    "$KSERVE_SCRIPT" "${KSERVE_ARGS[@]}"
+    success "KServe deployment complete"
+    exit 0
+fi
+
+# Check for GPU resources when --classifier-gpu is used
+if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+    GPU_NODES=$(oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '<none>' -c)
+    if [[ "$GPU_NODES" -eq 0 ]]; then
+        warn "No GPU resources detected. Install GPU operator first:"
+        warn "  ./deploy/kserve/install-gpu-operator.sh"
+        error "GPU required for --classifier-gpu deployment"
+        exit 1
+    fi
+    log "Found $GPU_NODES node(s) with GPU resources for semantic router classifier"
+fi
+
+# Build model backend image based on mode
+if [[ "$USE_SIMULATOR" == "true" ]]; then
+    # Use mock-vllm simulator (no GPU required)
+    log "Simulator mode: Building mock-vllm image..."
+    BACKEND_IMAGE_NAME="mock-vllm"
+    MOCK_VLLM_DIR="$SCRIPT_DIR/../../tools/mock-vllm"
+
+    if ! oc get imagestream mock-vllm -n "$NAMESPACE" &> /dev/null; then
+        if [[ -f "$MOCK_VLLM_DIR/Dockerfile" ]]; then
+            oc new-build --name mock-vllm --binary --strategy=docker -n "$NAMESPACE"
+            log "Uploading mock-vllm source and building..."
+            oc start-build mock-vllm --from-dir="$MOCK_VLLM_DIR" --follow -n "$NAMESPACE" || true
+
+            log "Waiting for build to complete..."
+            # Get the latest build to handle reruns (mock-vllm-1, mock-vllm-2, etc.)
+            LATEST_BUILD=$(oc get builds -l buildconfig=mock-vllm -n "$NAMESPACE" -o name --sort-by=.metadata.creationTimestamp | tail -1)
+            if [[ -n "$LATEST_BUILD" ]]; then
+                if ! oc wait --for=condition=Complete "$LATEST_BUILD" -n "$NAMESPACE" --timeout=60s 2>/dev/null; then
+                    warn "Build may still be in progress. Checking status..."
+                    oc get builds -n "$NAMESPACE"
+                fi
+            else
+                warn "No mock-vllm build found to wait for"
+            fi
+            success "mock-vllm image built"
+        else
+            error "mock-vllm Dockerfile not found at: $MOCK_VLLM_DIR/Dockerfile"
+            exit 1
+        fi
+    else
+        log "mock-vllm image already exists"
+    fi
 else
-    log "llm-katan image already exists"
+    # Use llm-katan (requires GPU)
+    log "Standard mode: Checking for llm-katan image..."
+    BACKEND_IMAGE_NAME="llm-katan"
+
+    if ! oc get imagestream llm-katan -n "$NAMESPACE" &> /dev/null; then
+        log "Building llm-katan image..."
+
+        if [[ -f "$SCRIPT_DIR/Dockerfile.llm-katan" ]]; then
+            oc new-build --dockerfile - --name llm-katan -n "$NAMESPACE" < "$SCRIPT_DIR/Dockerfile.llm-katan"
+        else
+            error "Dockerfile.llm-katan not found at: $SCRIPT_DIR/Dockerfile.llm-katan"
+            exit 1
+        fi
+
+        log "Waiting for build to start..."
+        sleep 5
+
+        log "Starting build..."
+        oc start-build llm-katan -n "$NAMESPACE" --follow || true
+
+        log "Waiting for build to complete..."
+        if ! oc wait --for=condition=Complete build/llm-katan-1 -n "$NAMESPACE" --timeout=600s 2>/dev/null; then
+            warn "Build may still be in progress. Checking status..."
+            oc get builds -n "$NAMESPACE"
+            oc logs build/llm-katan-1 -n "$NAMESPACE" --tail=50 || true
+        fi
+
+        success "llm-katan image built"
+    else
+        log "llm-katan image already exists"
+    fi
 fi
 
 # Create PVCs
@@ -164,7 +374,39 @@ success "PVCs created"
 
 # Deploy vLLM models FIRST to get their ClusterIPs
 log "Deploying vLLM model services and deployments..."
-oc apply -f "$SCRIPT_DIR/deployment.yaml" -n "$NAMESPACE"
+
+if [[ "$USE_SIMULATOR" == "true" ]]; then
+    log "Simulator mode: Using deployment-simulator.yaml (mock-vllm, no GPU required)..."
+    oc apply -f "$SCRIPT_DIR/deployment-simulator.yaml" -n "$NAMESPACE"
+else
+    oc apply -f "$SCRIPT_DIR/deployment.yaml" -n "$NAMESPACE"
+fi
+
+if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+    oc patch deployment/semantic-router -n "$NAMESPACE" --type='merge' -p '{
+      "spec": {
+        "template": {
+          "spec": {
+            "nodeSelector": {"nvidia.com/gpu.present": "true"},
+            "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
+            "containers": [{
+              "name": "semantic-router",
+              "env": [
+                {"name": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
+                {"name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility"},
+                {"name": "CUDA_VISIBLE_DEVICES", "value": "0"}
+              ],
+              "resources": {
+                "requests": {"nvidia.com/gpu": 1},
+                "limits": {"nvidia.com/gpu": 1}
+              }
+            }]
+          }
+        }
+      }
+    }' >/dev/null
+    log "Patched semantic-router deployment for GPU classifier"
+fi
 
 # Wait for services to be created and get ClusterIPs
 log "Waiting for vLLM services to get ClusterIPs..."
@@ -188,9 +430,20 @@ done
 # Generate dynamic config with actual ClusterIPs
 log "Generating dynamic configuration with ClusterIPs..."
 TEMP_CONFIG="/tmp/config-openshift-dynamic.yaml"
+
 sed -e "s/DYNAMIC_MODEL_A_IP/$MODEL_A_IP/g" \
     -e "s/DYNAMIC_MODEL_B_IP/$MODEL_B_IP/g" \
     "$SCRIPT_DIR/config-openshift.yaml" > "$TEMP_CONFIG"
+
+if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+    yq eval \
+      '.bert_model.use_cpu = false |
+       .prompt_guard.use_cpu = false |
+       .classifier.category_model.use_cpu = false |
+       .classifier.pii_model.use_cpu = false' \
+      -i "$TEMP_CONFIG"
+    log "Patched config for GPU classifier (use_cpu=false)"
+fi
 
 # Verify the IPs were substituted
 if ! grep -q "$MODEL_A_IP" "$TEMP_CONFIG" || ! grep -q "$MODEL_B_IP" "$TEMP_CONFIG"; then
@@ -218,18 +471,8 @@ rm -f "$TEMP_CONFIG"
 
 success "Deployment manifests applied"
 
-# Deploy MongoDB (required for ChatUI)
-log "Deploying MongoDB for ChatUI..."
-oc apply -f "$SCRIPT_DIR/mongo/deployment.yaml" -n "$NAMESPACE"
-success "MongoDB deployment applied"
-
-# Deploy ChatUI (HuggingChat interface)
-log "Deploying ChatUI (HuggingChat)..."
-oc apply -f "$SCRIPT_DIR/chatui/deployment.yaml" -n "$NAMESPACE"
-success "ChatUI deployment applied"
-
-# Deploy Dashboard with ChatUI integration
-log "Deploying Dashboard with ChatUI integration..."
+# Deploy Dashboard
+log "Deploying Dashboard..."
 oc apply -f "$SCRIPT_DIR/dashboard/dashboard-deployment.yaml" -n "$NAMESPACE"
 success "Dashboard deployment applied"
 
@@ -321,32 +564,6 @@ log "This may take several minutes as models are downloaded..."
 if [[ "$DEPLOY_OBSERVABILITY" == "true" ]]; then
     log "Deploying observability components..."
 
-    # Create OpenWebUI PVC
-    log "Creating OpenWebUI PVC..."
-    cat <<EOF | oc apply -n "$NAMESPACE" -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: openwebui-data
-  labels:
-    app: openwebui
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: gp3-csi
-EOF
-    success "OpenWebUI PVC created"
-
-    # Deploy OpenWebUI
-    log "Deploying OpenWebUI..."
-    oc apply -f "$SCRIPT_DIR/openwebui/deployment.yaml" -n "$NAMESPACE"
-    oc apply -f "$SCRIPT_DIR/openwebui/service.yaml" -n "$NAMESPACE"
-    oc apply -f "$SCRIPT_DIR/openwebui/route.yaml" -n "$NAMESPACE"
-    success "OpenWebUI deployed"
-
     # Deploy Grafana with dynamic route URL
     log "Deploying Grafana..."
 
@@ -354,7 +571,9 @@ EOF
     oc apply -f "$SCRIPT_DIR/observability/grafana/pvc.yaml" -n "$NAMESPACE" 2>/dev/null || true
     oc apply -f "$SCRIPT_DIR/observability/grafana/service.yaml" -n "$NAMESPACE" 2>/dev/null || true
     oc apply -f "$SCRIPT_DIR/observability/grafana/route.yaml" -n "$NAMESPACE" 2>/dev/null || true
-    oc apply -f "$SCRIPT_DIR/observability/grafana/configmaps.yaml" -n "$NAMESPACE" 2>/dev/null || true
+    oc apply -f "$SCRIPT_DIR/observability/grafana/configmap-dashboard.yaml" -n "$NAMESPACE" 2>/dev/null || true
+    oc apply -f "$SCRIPT_DIR/observability/grafana/configmap-datasource.yaml" -n "$NAMESPACE" 2>/dev/null || true
+    oc apply -f "$SCRIPT_DIR/observability/grafana/configmap-provisioning.yaml" -n "$NAMESPACE" 2>/dev/null || true
 
     # Wait for route to be created and get its URL
     log "Waiting for Grafana route to be created..."
@@ -410,13 +629,19 @@ EOF
     # Check if dashboard buildconfig exists
     if ! oc get buildconfig dashboard-custom -n "$NAMESPACE" &>/dev/null; then
         log "Creating dashboard build configuration..."
-        cd "$SCRIPT_DIR/../../dashboard"
+        cd "$SCRIPT_DIR/../.."
         oc new-build --name=dashboard-custom --binary --strategy=docker --to=dashboard-custom:latest -n "$NAMESPACE"
     fi
+    # Build context is repo root, so we must point the BuildConfig at dashboard/Dockerfile.
+    # Ensure dockerfilePath is set whether it already exists (replace) or not (add).
+    oc patch buildconfig/dashboard-custom -n "$NAMESPACE" --type='json' \
+        -p='[{"op":"test","path":"/spec/strategy/dockerStrategy/dockerfilePath","value":"dashboard/Dockerfile"},{"op":"replace","path":"/spec/strategy/dockerStrategy/dockerfilePath","value":"dashboard/Dockerfile"}]' \
+        2>/dev/null || oc patch buildconfig/dashboard-custom -n "$NAMESPACE" --type='json' \
+        -p='[{"op":"add","path":"/spec/strategy/dockerStrategy/dockerfilePath","value":"dashboard/Dockerfile"}]'
 
-    # Start the build from local dashboard directory
+    # Start the build from repo root so the dashboard build can access src/semantic-router
     log "Building dashboard image from source..."
-    cd "$SCRIPT_DIR/../../dashboard"
+    cd "$SCRIPT_DIR/../.."
     oc start-build dashboard-custom --from-dir=. --follow -n "$NAMESPACE" || warn "Dashboard build may still be in progress"
 
     # Deploy dashboard
@@ -426,13 +651,11 @@ EOF
 
     # Wait for observability deployments
     log "Waiting for observability components to be ready..."
-    oc rollout status deployment/openwebui -n "$NAMESPACE" --timeout=5m || warn "OpenWebUI may still be starting"
     oc rollout status deployment/dashboard -n "$NAMESPACE" --timeout=5m || warn "Dashboard may still be starting"
 
     success "Observability components deployed!"
     echo ""
     echo "  Dashboard: https://$(oc get route dashboard -n $NAMESPACE -o jsonpath='{.spec.host}' 2>/dev/null || echo 'route-not-ready')"
-    echo "  OpenWebUI: https://$(oc get route openwebui -n $NAMESPACE -o jsonpath='{.spec.host}' 2>/dev/null || echo 'route-not-ready')"
     echo "  Grafana:   https://$(oc get route grafana -n $NAMESPACE -o jsonpath='{.spec.host}' 2>/dev/null || echo 'route-not-ready')"
     echo "  Prometheus: https://$(oc get route prometheus -n $NAMESPACE -o jsonpath='{.spec.host}' 2>/dev/null || echo 'route-not-ready')"
     echo ""
@@ -440,7 +663,13 @@ else
     log "Skipping observability components (--no-observability flag provided)"
 fi
 
-success "Deployment initiated! Check status with the following commands:"
+if [[ "$USE_CLASSIFIER_GPU" == "true" ]]; then
+    success "GPU-enabled classifier deployment initiated! Semantic router classifier will run on GPU."
+else
+    success "Deployment initiated!"
+fi
+echo ""
+echo "Check status with the following commands:"
 echo ""
 echo "  # View all pods"
 echo "  oc get pods -n $NAMESPACE"
@@ -466,15 +695,6 @@ echo ""
 echo "  # Check logs for Envoy"
 echo "  oc logs -f deployment/semantic-router -c envoy-proxy -n $NAMESPACE"
 echo ""
-echo "  # Check logs for MongoDB"
-echo "  oc logs -f deployment/mongo -n $NAMESPACE"
-echo ""
-echo "  # Check logs for ChatUI (HuggingChat)"
-echo "  oc logs -f deployment/chatui -n $NAMESPACE"
-echo ""
 echo "  # Check logs for Dashboard"
 echo "  oc logs -f deployment/dashboard -n $NAMESPACE"
 echo ""
-echo "  # Access ChatUI through Dashboard"
-echo "  DASHBOARD_URL=\$(oc get route dashboard -n $NAMESPACE -o jsonpath='{.spec.host}')"
-echo "  echo \"HuggingChat: https://\$DASHBOARD_URL/huggingchat\""

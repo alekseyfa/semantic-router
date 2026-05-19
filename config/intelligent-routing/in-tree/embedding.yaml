@@ -1,5 +1,5 @@
 bert_model:
-  model_id: models/all-MiniLM-L12-v2
+  model_id: models/mom-embedding-light
   threshold: 0.6
   use_cpu: true
 
@@ -34,11 +34,11 @@ tools:
 
 prompt_guard:
   enabled: true  # Global default - can be overridden per category with jailbreak_enabled
-  use_modernbert: true
-  model_id: "models/jailbreak_classifier_modernbert-base_model"
+  use_modernbert: false
+  model_id: "models/mom-jailbreak-classifier"
   threshold: 0.7
   use_cpu: true
-  jailbreak_mapping_path: "models/jailbreak_classifier_modernbert-base_model/jailbreak_type_mapping.json"
+  jailbreak_mapping_path: "models/mom-jailbreak-classifier/jailbreak_type_mapping.json"
 
 # vLLM Endpoints Configuration
 # IMPORTANT: 'address' field must be a valid IP address (IPv4 or IPv6)
@@ -46,7 +46,7 @@ prompt_guard:
 # NOT supported: domain names (example.com), protocol prefixes (http://), paths (/api), ports in address (use 'port' field)
 vllm_endpoints:
   - name: "endpoint1"
-    address: "172.28.0.20"  # Static IPv4 of llm-katan within docker compose network
+    address: "172.28.0.20"  # Static IPv4 of llm-katan
     port: 8002
     weight: 1
 
@@ -58,17 +58,17 @@ model_config:
 # Classifier configuration
 classifier:
   category_model:
-    model_id: "models/category_classifier_modernbert-base_model"
-    use_modernbert: true
+    model_id: "models/mom-domain-classifier"
+    use_modernbert: false
     threshold: 0.6
     use_cpu: true
-    category_mapping_path: "models/category_classifier_modernbert-base_model/category_mapping.json"
+    category_mapping_path: "models/mom-domain-classifier/category_mapping.json"
   pii_model:
     model_id: "models/pii_classifier_modernbert-base_presidio_token_model"
-    use_modernbert: true
+    use_modernbert: false
     threshold: 0.7
     use_cpu: true
-    pii_mapping_path: "models/pii_classifier_modernbert-base_presidio_token_model/pii_type_mapping.json"
+    pii_mapping_path: "models/mom-pii-classifier/pii_type_mapping.json"
 
 # Embedding-based classification rules
 # These rules use semantic similarity between query text and keywords
@@ -239,8 +239,8 @@ decisions:
 # - Qwen3-Embedding-0.6B: Up to 32K context, high quality, 1024-dim embeddings
 # - EmbeddingGemma-300M: Up to 8K context, fast inference, Matryoshka support (768/512/256/128)
 embedding_models:
-  qwen3_model_path: "models/Qwen3-Embedding-0.6B"
-  gemma_model_path: "models/embeddinggemma-300m"
+  qwen3_model_path: "models/mom-embedding-pro"
+  gemma_model_path: "models/mom-embedding-flash"
   use_cpu: true  # Set to false for GPU acceleration (requires CUDA)
 
 # Default model for fallback

@@ -23,7 +23,7 @@ use std::sync::Arc;
 #[rstest]
 #[serial]
 fn test_load_qwen3_config_valid() {
-    let config = Qwen3EmbeddingConfig::from_pretrained("../models/Qwen3-Embedding-0.6B").unwrap();
+    let config = Qwen3EmbeddingConfig::from_pretrained("../models/mom-embedding-pro").unwrap();
 
     // Validate critical model-agnostic parameters
     assert_eq!(
@@ -1512,7 +1512,7 @@ fn load_reference_outputs() -> Vec<ReferenceOutput> {
             panic!("Failed to generate reference data");
         }
 
-        eprintln!("✅ Reference data generated successfully");
+        eprintln!("Reference data generated successfully");
     }
 
     let json_content =

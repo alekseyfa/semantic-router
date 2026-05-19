@@ -44,6 +44,16 @@ e2e-test-ai-gateway: ## Run E2E tests with AI Gateway profile
 e2e-test-ai-gateway: E2E_PROFILE=ai-gateway
 e2e-test-ai-gateway: e2e-test
 
+# Run E2E tests with Dynamo profile (requires GPU)
+e2e-test-dynamo: ## Run E2E tests with Dynamo profile (requires 3+ GPUs)
+e2e-test-dynamo: E2E_PROFILE=dynamo
+e2e-test-dynamo: e2e-test
+
+# Run E2E tests with RAG hybrid search profile (multi-store, BM25 + n-gram + vector)
+e2e-test-rag-hybrid-search: ## Run E2E tests with RAG hybrid search profile
+e2e-test-rag-hybrid-search: E2E_PROFILE=rag-hybrid-search
+e2e-test-rag-hybrid-search: e2e-test
+
 # Run E2E tests and keep cluster for debugging
 e2e-test-debug: ## Run E2E tests and keep cluster for debugging
 e2e-test-debug: E2E_KEEP_CLUSTER=true
@@ -94,10 +104,14 @@ e2e-help: ## Show help for E2E testing
 	@echo "E2E Testing Framework"
 	@echo ""
 	@echo "Available Profiles:"
-	@echo "  ai-gateway  - Test Semantic Router with Envoy AI Gateway"
-	@echo "  aibrix      - Test Semantic Router with vLLM AIBrix"
-	@echo "  llm-d       - Test Semantic Router with LLM-D"
-	@echo "  istio       - Test Semantic Router with Istio (coming soon)"
+	@echo "  ai-gateway       - Test Semantic Router with Envoy AI Gateway"
+	@echo "  aibrix           - Test Semantic Router with vLLM AIBrix"
+	@echo "  dynamo           - Test Semantic Router with Nvidia Dynamo (requires 3+ GPUs)"
+	@echo "  istio            - Test Semantic Router with Istio service mesh"
+	@echo "  llm-d            - Test Semantic Router with LLM-D"
+	@echo "  production-stack - Test Semantic Router in production-like stack (HA/LB/Obs)"
+	@echo "  rag-hybrid-search - Test RAG multi-store and hybrid search (BM25 + n-gram + vector)"
+	@echo "  response-api     - Test Response API endpoints (POST/GET/DELETE /v1/responses)"
 	@echo ""
 	@echo "Environment Variables:"
 	@echo "  E2E_PROFILE              - Test profile to run (default: ai-gateway)"
@@ -114,6 +128,7 @@ e2e-help: ## Show help for E2E testing
 	@echo "Common Commands:"
 	@echo "  make e2e-test                                    # Run all tests with default profile"
 	@echo "  make e2e-test E2E_PROFILE=ai-gateway             # Run AI Gateway tests"
+	@echo "  make e2e-test-dynamo                             # Run Dynamo tests (requires GPU)"
 	@echo "  make e2e-test-debug                              # Run tests and keep cluster"
 	@echo "  make e2e-test-specific E2E_TESTS=\"test1,test2\"   # Run specific tests"
 	@echo "  make e2e-cleanup                                 # Clean up test cluster"

@@ -84,19 +84,19 @@ func (m *MCPCategoryClassifier) Init(cfg *config.RouterConfig) error {
 
 	// Create MCP client configuration
 	mcpConfig := mcpclient.ClientConfig{
-		TransportType: cfg.MCPCategoryModel.TransportType,
-		Command:       cfg.MCPCategoryModel.Command,
-		Args:          cfg.MCPCategoryModel.Args,
-		Env:           cfg.MCPCategoryModel.Env,
-		URL:           cfg.MCPCategoryModel.URL,
+		TransportType: cfg.TransportType,
+		Command:       cfg.Command,
+		Args:          cfg.Args,
+		Env:           cfg.Env,
+		URL:           cfg.URL,
 		Options: mcpclient.ClientOptions{
 			LogEnabled: true,
 		},
 	}
 
 	// Set timeout if specified
-	if cfg.MCPCategoryModel.TimeoutSeconds > 0 {
-		mcpConfig.Timeout = time.Duration(cfg.MCPCategoryModel.TimeoutSeconds) * time.Second
+	if cfg.TimeoutSeconds > 0 {
+		mcpConfig.Timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
 	}
 
 	// Create MCP client
@@ -125,8 +125,8 @@ func (m *MCPCategoryClassifier) Init(cfg *config.RouterConfig) error {
 // discoverClassificationTool finds the appropriate classification tool from available MCP tools
 func (m *MCPCategoryClassifier) discoverClassificationTool() error {
 	// If tool name is explicitly specified, use it
-	if m.config.MCPCategoryModel.ToolName != "" {
-		m.toolName = m.config.MCPCategoryModel.ToolName
+	if m.config.ToolName != "" {
+		m.toolName = m.config.ToolName
 		logging.Infof("Using explicitly configured tool: %s", m.toolName)
 		return nil
 	}
@@ -380,9 +380,9 @@ func (c *Classifier) initializeMCPCategoryClassifier() error {
 
 		// Create a context with timeout for the list_categories call
 		ctx := context.Background()
-		if c.Config.MCPCategoryModel.TimeoutSeconds > 0 {
+		if c.Config.TimeoutSeconds > 0 {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(c.Config.MCPCategoryModel.TimeoutSeconds)*time.Second)
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(c.Config.TimeoutSeconds)*time.Second)
 			defer cancel()
 		}
 
@@ -413,17 +413,14 @@ func (c *Classifier) classifyCategoryWithEntropyMCP(text string) (string, float6
 
 	// Create context with timeout
 	ctx := context.Background()
-	if c.Config.MCPCategoryModel.TimeoutSeconds > 0 {
+	if c.Config.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.Config.MCPCategoryModel.TimeoutSeconds)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.Config.TimeoutSeconds)*time.Second)
 		defer cancel()
 	}
 
 	// Get full probability distribution via MCP
-	start := time.Now()
 	result, err := c.mcpCategoryInference.ClassifyWithProbabilities(ctx, text)
-	metrics.RecordClassifierLatency("category_mcp", time.Since(start).Seconds())
-
 	if err != nil {
 		return "", 0.0, entropy.ReasoningDecision{}, fmt.Errorf("MCP classification error: %w", err)
 	}
@@ -527,11 +524,20 @@ func (c *Classifier) classifyCategoryWithEntropyMCP(text string) (string, float6
 
 	// Check confidence threshold for category determination
 	if result.Confidence < threshold {
-		logging.Infof("MCP classification confidence (%.4f) below threshold (%.4f), but entropy analysis available",
-			result.Confidence, threshold)
+		// Determine fallback category (default to "other" if not configured)
+		fallbackCategory := c.Config.FallbackCategory
+		if fallbackCategory == "" {
+			fallbackCategory = "other"
+		}
 
-		// Still return reasoning decision based on entropy even if confidence is low
-		return "", float64(result.Confidence), reasoningDecision, nil
+		logging.Infof("MCP classification confidence (%.4f) below threshold (%.4f), falling back to category: %s",
+			result.Confidence, threshold, fallbackCategory)
+
+		// Record the fallback category as a signal match
+		metrics.RecordSignalMatch(config.SignalTypeKeyword, fallbackCategory)
+
+		// Return fallback category instead of empty string to enable proper decision routing
+		return fallbackCategory, float64(result.Confidence), reasoningDecision, nil
 	}
 
 	// Map class index to category name
@@ -551,8 +557,8 @@ func (c *Classifier) classifyCategoryWithEntropyMCP(text string) (string, float6
 		genericCategory = categoryName
 	}
 
-	// Record the category classification metric
-	metrics.RecordCategoryClassification(genericCategory)
+	// Record the category as a signal match
+	metrics.RecordSignalMatch(config.SignalTypeKeyword, genericCategory)
 
 	logging.Infof("MCP classified as category: %s (mmlu=%s), reasoning_decision: use=%t, confidence=%.3f, reason=%s",
 		genericCategory, categoryName, reasoningDecision.UseReasoning, reasoningDecision.Confidence, reasoningDecision.DecisionReason)

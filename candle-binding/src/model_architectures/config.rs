@@ -197,8 +197,8 @@ impl Default for EmbeddingConfig {
             gemma_batch_size: 16,
             // Maximum sequence length: 32K for Qwen3, 8K for Gemma
             max_sequence_length: 32768,
-            // Enable performance tracking by default
-            enable_performance_tracking: true,
+            // Disable performance tracking by default to reduce log noise
+            enable_performance_tracking: false,
         }
     }
 }
@@ -225,9 +225,10 @@ impl DualPathConfig {
             ModelType::LoRA => {
                 config.global.path_selection = PathSelectionStrategy::AlwaysLoRA;
             }
-            ModelType::Qwen3Embedding | ModelType::GemmaEmbedding => {
-                //   Embedding models use automatic selection
-                // Selection is handled by UnifiedClassifier::select_embedding_model()
+            ModelType::Qwen3Embedding
+            | ModelType::GemmaEmbedding
+            | ModelType::MmBertEmbedding
+            | ModelType::MultiModalEmbedding => {
                 config.global.path_selection = PathSelectionStrategy::Automatic;
             }
         }
@@ -283,6 +284,8 @@ impl DualPathConfig {
             ModelType::LoRA => self.lora.parallel_batch_size,
             ModelType::Qwen3Embedding => self.embedding.qwen3_batch_size,
             ModelType::GemmaEmbedding => self.embedding.gemma_batch_size,
+            ModelType::MmBertEmbedding => 32,
+            ModelType::MultiModalEmbedding => 64,
         }
     }
 
@@ -291,12 +294,10 @@ impl DualPathConfig {
         match model_type {
             ModelType::Traditional => self.traditional.confidence_threshold,
             ModelType::LoRA => self.lora.confidence_threshold,
-            ModelType::Qwen3Embedding | ModelType::GemmaEmbedding => {
-                //  Embedding models don't produce classification confidence
-                // Embeddings are vector representations, not classification predictions
-                // Return 0.0 as embeddings don't have confidence scores
-                0.0
-            }
+            ModelType::Qwen3Embedding
+            | ModelType::GemmaEmbedding
+            | ModelType::MmBertEmbedding
+            | ModelType::MultiModalEmbedding => 0.0,
         }
     }
 }

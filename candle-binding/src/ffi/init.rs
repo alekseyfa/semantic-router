@@ -20,6 +20,10 @@ pub static BERT_SIMILARITY: OnceLock<Arc<BertSimilarity>> = OnceLock::new();
 static BERT_CLASSIFIER: OnceLock<Arc<BertClassifier>> = OnceLock::new();
 static BERT_PII_CLASSIFIER: OnceLock<Arc<BertClassifier>> = OnceLock::new();
 static BERT_JAILBREAK_CLASSIFIER: OnceLock<Arc<BertClassifier>> = OnceLock::new();
+// Feedback detector classifier (exported for use in classify.rs)
+pub static FEEDBACK_DETECTOR_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
 // DeBERTa v3 jailbreak/prompt injection classifier (exported for use in classify.rs)
 pub static DEBERTA_JAILBREAK_CLASSIFIER: OnceLock<
     Arc<crate::model_architectures::traditional::deberta_v3::DebertaV3Classifier>,
@@ -36,6 +40,23 @@ pub static PARALLEL_LORA_ENGINE: OnceLock<
 // LoRA token classifier for token-level classification
 pub static LORA_TOKEN_CLASSIFIER: OnceLock<
     Arc<crate::classifiers::lora::token_lora::LoRATokenClassifier>,
+> = OnceLock::new();
+// LoRA intent classifier for sequence classification
+pub static LORA_INTENT_CLASSIFIER: OnceLock<
+    Arc<crate::classifiers::lora::intent_lora::IntentLoRAClassifier>,
+> = OnceLock::new();
+// Hallucination detector (ModernBERT token classifier for RAG verification)
+pub static HALLUCINATION_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier>,
+> = OnceLock::new();
+// ModernBERT NLI classifier for hallucination explanation (NLI post-processing)
+// Model: tasksource/ModernBERT-base-nli
+pub static NLI_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+// LoRA jailbreak classifier for security threat detection
+pub static LORA_JAILBREAK_CLASSIFIER: OnceLock<
+    Arc<crate::classifiers::lora::security_lora::SecurityLoRAClassifier>,
 > = OnceLock::new();
 
 /// Model type detection for intelligent routing
@@ -227,7 +248,11 @@ pub extern "C" fn init_pii_classifier(
     }
 }
 
-/// Initialize jailbreak classifier
+/// Initialize jailbreak classifier with LoRA auto-detection
+///
+/// Intelligent model type detection (same pattern as intent classifier):
+/// 1. Checks for lora_config.json → Routes to LoRA jailbreak classifier
+/// 2. Falls back to Traditional BERT if LoRA config not found
 ///
 /// # Safety
 /// - `model_id` must be a valid null-terminated C string
@@ -237,24 +262,54 @@ pub extern "C" fn init_jailbreak_classifier(
     num_classes: i32,
     use_cpu: bool,
 ) -> bool {
-    let model_id = unsafe {
+    let model_path = unsafe {
         match CStr::from_ptr(model_id).to_str() {
             Ok(s) => s,
             Err(_) => return false,
         }
     };
 
-    // Ensure num_classes is valid
-    if num_classes < 2 {
-        eprintln!("Number of classes must be at least 2, got {num_classes}");
-        return false;
-    }
+    // Intelligent model type detection (same as intent classifier)
+    let model_type = detect_model_type(model_path);
 
-    match BertClassifier::new(model_id, num_classes as usize, use_cpu) {
-        Ok(classifier) => BERT_JAILBREAK_CLASSIFIER.set(Arc::new(classifier)).is_ok(),
-        Err(e) => {
-            eprintln!("Failed to initialize BERT jailbreak classifier: {e}");
-            false
+    match model_type {
+        ModelType::LoRA => {
+            // Check if already initialized
+            if LORA_JAILBREAK_CLASSIFIER.get().is_some() {
+                return true; // Already initialized, return success
+            }
+
+            // Route to LoRA jailbreak classifier (SecurityLoRAClassifier)
+            match crate::classifiers::lora::security_lora::SecurityLoRAClassifier::new(
+                model_path, use_cpu,
+            ) {
+                Ok(classifier) => LORA_JAILBREAK_CLASSIFIER.set(Arc::new(classifier)).is_ok(),
+                Err(e) => {
+                    eprintln!(
+                        "  ERROR: Failed to initialize LoRA jailbreak classifier: {}",
+                        e
+                    );
+                    false
+                }
+            }
+        }
+        ModelType::Traditional => {
+            eprintln!("🔍 Detected Traditional BERT model for jailbreak classification");
+
+            // Ensure num_classes is valid
+            if num_classes < 2 {
+                eprintln!("Number of classes must be at least 2, got {num_classes}");
+                return false;
+            }
+
+            // Initialize Traditional BERT jailbreak classifier
+            match BertClassifier::new(model_path, num_classes as usize, use_cpu) {
+                Ok(classifier) => BERT_JAILBREAK_CLASSIFIER.set(Arc::new(classifier)).is_ok(),
+                Err(e) => {
+                    eprintln!("Failed to initialize BERT jailbreak classifier: {e}");
+                    false
+                }
+            }
         }
     }
 }
@@ -368,6 +423,591 @@ pub extern "C" fn init_modernbert_jailbreak_classifier(
     }
 }
 
+// ============================================================================
+// mmBERT (Multilingual ModernBERT) Initialization Functions
+// ============================================================================
+
+// Global static for mmBERT classifier (8K context)
+pub static MMBERT_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+pub static MMBERT_TOKEN_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier>,
+> = OnceLock::new();
+
+// Global statics for mmBERT-32K classifiers (32K context with YaRN RoPE scaling)
+pub static MMBERT_32K_INTENT_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+pub static MMBERT_32K_FACTCHECK_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+pub static MMBERT_32K_JAILBREAK_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+pub static MMBERT_32K_FEEDBACK_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+pub static MMBERT_32K_PII_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier>,
+> = OnceLock::new();
+pub static MMBERT_32K_MODALITY_CLASSIFIER: OnceLock<
+    Arc<crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier>,
+> = OnceLock::new();
+
+/// Initialize mmBERT classifier (multilingual ModernBERT)
+///
+/// mmBERT is a multilingual encoder supporting 1800+ languages with:
+/// - 256k vocabulary
+/// - 8192 max sequence length
+/// - RoPE positional embeddings
+///
+/// Reference: https://huggingface.co/jhu-clsp/mmBERT-base
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+///
+/// # Returns
+/// - true if initialization succeeded
+/// - false if initialization failed
+#[no_mangle]
+pub extern "C" fn init_mmbert_classifier(model_id: *const c_char, use_cpu: bool) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "🌐 Initializing mmBERT (multilingual) classifier from: {}",
+        model_id
+    );
+
+    // Explicitly load as Multilingual variant
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual,
+    ) {
+        Ok(model) => {
+            let is_multilingual = model.is_multilingual();
+            eprintln!("   mmBERT loaded (is_multilingual: {})", is_multilingual);
+            MMBERT_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT classifier with auto-detection
+///
+/// This function auto-detects whether a model is mmBERT (multilingual) or standard ModernBERT
+/// based on the model's config.json (vocab_size >= 200000 and position_embedding_type == "sans_pos").
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+///
+/// # Returns
+/// - true if initialization succeeded
+/// - false if initialization failed
+#[no_mangle]
+pub extern "C" fn init_mmbert_classifier_auto(model_id: *const c_char, use_cpu: bool) -> bool {
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!("🔍 Auto-detecting ModernBERT variant from: {}", model_id);
+
+    // Load with auto-detection (will detect mmBERT from config.json)
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory(
+        model_id,
+        use_cpu,
+    ) {
+        Ok(model) => {
+            let variant = model.variant();
+            let is_multilingual = model.is_multilingual();
+            eprintln!("   Detected variant: {:?} (multilingual: {})", variant, is_multilingual);
+            MMBERT_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT token classifier (multilingual)
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+///
+/// # Returns
+/// - true if initialization succeeded
+/// - false if initialization failed
+#[no_mangle]
+pub extern "C" fn init_mmbert_token_classifier(model_id: *const c_char, use_cpu: bool) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "🌐 Initializing mmBERT (multilingual) token classifier from: {}",
+        model_id
+    );
+
+    // Explicitly load as Multilingual variant
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier::new_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual,
+    ) {
+        Ok(classifier) => {
+            let is_multilingual = classifier.is_multilingual();
+            eprintln!("   mmBERT token classifier loaded (is_multilingual: {})", is_multilingual);
+            MMBERT_TOKEN_CLASSIFIER.set(Arc::new(classifier)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT token classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Check if a model is mmBERT (multilingual) based on config.json
+///
+/// Returns true if the model has vocab_size >= 200000 and uses sans_pos position embeddings.
+///
+/// # Safety
+/// - `config_path` must be a valid null-terminated C string pointing to config.json
+#[no_mangle]
+pub extern "C" fn is_mmbert_model(config_path: *const c_char) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let config_path = unsafe {
+        match CStr::from_ptr(config_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    match ModernBertVariant::detect_from_config(config_path) {
+        Ok(variant) => {
+            // Both Multilingual and Multilingual32K are mmBERT variants
+            variant == ModernBertVariant::Multilingual
+                || variant == ModernBertVariant::Multilingual32K
+        }
+        Err(_) => false,
+    }
+}
+
+// ============================================================================
+// mmBERT-32K (YaRN RoPE scaling) FFI functions
+// These support 32K context length with multilingual capabilities
+// Reference: https://huggingface.co/llm-semantic-router/mmbert-32k-yarn
+// ============================================================================
+
+/// Initialize mmBERT-32K intent classifier
+///
+/// Model classifies text into MMLU-Pro academic categories for request routing.
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_intent_classifier(
+    model_id: *const c_char,
+    use_cpu: bool,
+) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "🎯 Initializing mmBERT-32K intent classifier from: {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(model) => {
+            eprintln!("   mmBERT-32K intent classifier loaded (32K context, YaRN RoPE)");
+            MMBERT_32K_INTENT_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K intent classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT-32K fact-check classifier
+///
+/// Model classifies if text needs fact-checking.
+/// Outputs: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_factcheck_classifier(
+    model_id: *const c_char,
+    use_cpu: bool,
+) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "Initializing mmBERT-32K fact-check classifier from: {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(model) => {
+            eprintln!("   mmBERT-32K fact-check classifier loaded");
+            MMBERT_32K_FACTCHECK_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K fact-check classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT-32K jailbreak detector
+///
+/// Model detects prompt injection/jailbreak attempts.
+/// Outputs: 0=benign, 1=jailbreak
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_jailbreak_classifier(
+    model_id: *const c_char,
+    use_cpu: bool,
+) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "Initializing mmBERT-32K jailbreak detector from: {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(model) => {
+            eprintln!("   mmBERT-32K jailbreak detector loaded");
+            MMBERT_32K_JAILBREAK_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K jailbreak detector: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT-32K feedback detector
+///
+/// Model detects user satisfaction from follow-up messages.
+/// Outputs: 0=SAT, 1=NEED_CLARIFICATION, 2=WRONG_ANSWER, 3=WANT_DIFFERENT
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_feedback_classifier(
+    model_id: *const c_char,
+    use_cpu: bool,
+) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "📊 Initializing mmBERT-32K feedback detector from: {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(model) => {
+            eprintln!("   mmBERT-32K feedback detector loaded");
+            MMBERT_32K_FEEDBACK_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K feedback detector: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT-32K PII detector (token classification)
+///
+/// Model detects 17 types of PII entities using BIO tagging.
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_pii_classifier(model_id: *const c_char, use_cpu: bool) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!("Initializing mmBERT-32K PII detector from: {}", model_id);
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier::new_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(classifier) => {
+            eprintln!("   mmBERT-32K PII detector loaded");
+            MMBERT_32K_PII_CLASSIFIER.set(Arc::new(classifier)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K PII detector: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize mmBERT-32K modality routing classifier
+///
+/// Classifies user prompt intent into response modality:
+/// - AR (0): Text-only response via autoregressive LLM
+/// - DIFFUSION (1): Image generation via diffusion model
+/// - BOTH (2): Hybrid response requiring both text and image
+///
+/// Reference: https://huggingface.co/llm-semantic-router/mmbert32k-modality-router-merged
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn init_mmbert_32k_modality_classifier(
+    model_id: *const c_char,
+    use_cpu: bool,
+) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    eprintln!(
+        "🎯 Initializing mmBERT-32K modality routing classifier from: {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory_with_variant(
+        model_id,
+        use_cpu,
+        ModernBertVariant::Multilingual32K,
+    ) {
+        Ok(model) => {
+            eprintln!("   mmBERT-32K modality router loaded (AR/DIFFUSION/BOTH, 32K context)");
+            MMBERT_32K_MODALITY_CLASSIFIER.set(Arc::new(model)).is_ok()
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to initialize mmBERT-32K modality router: {}", e);
+            false
+        }
+    }
+}
+
+/// Check if a model is mmBERT-32K (YaRN scaled) based on config.json
+///
+/// Returns true if the model has max_position_embeddings >= 16384 or rope_theta >= 100000
+///
+/// # Safety
+/// - `config_path` must be a valid null-terminated C string pointing to config.json
+#[no_mangle]
+pub extern "C" fn is_mmbert_32k_model(config_path: *const c_char) -> bool {
+    use crate::model_architectures::traditional::modernbert::ModernBertVariant;
+
+    let config_path = unsafe {
+        match CStr::from_ptr(config_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    match ModernBertVariant::detect_from_config(config_path) {
+        Ok(variant) => variant == ModernBertVariant::Multilingual32K,
+        Err(_) => false,
+    }
+}
+
+/// Initialize ModernBERT fact-check classifier (halugate-sentinel model)
+///
+/// This initializes the halugate-sentinel ModernBERT model for classifying
+/// whether a prompt needs fact-checking.
+///
+/// Model outputs:
+/// - 0: NO_FACT_CHECK_NEEDED
+/// - 1: FACT_CHECK_NEEDED
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+/// - Caller must ensure proper memory management
+///
+/// # Returns
+/// `true` if initialization succeeds, `false` otherwise
+///
+/// # Example
+/// ```c
+/// bool success = init_fact_check_classifier(
+///     "models/halugate-sentinel",
+///     true  // use CPU
+/// );
+/// ```
+#[no_mangle]
+pub extern "C" fn init_fact_check_classifier(model_id: *const c_char, use_cpu: bool) -> bool {
+    // Check if already initialized - return true if so (idempotent)
+    if crate::model_architectures::traditional::modernbert::TRADITIONAL_MODERNBERT_FACT_CHECK_CLASSIFIER.get().is_some() {
+        println!("Fact-check classifier already initialized");
+        return true;
+    }
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    println!(
+        "🔧 Initializing fact-check classifier (halugate-sentinel): {}",
+        model_id
+    );
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory(model_id, use_cpu) {
+        Ok(model) => {
+            match crate::model_architectures::traditional::modernbert::TRADITIONAL_MODERNBERT_FACT_CHECK_CLASSIFIER.set(Arc::new(model)) {
+                Ok(_) => {
+                    println!("Fact-check classifier initialized successfully");
+                    true
+                }
+                Err(_) => {
+                    // Already initialized by another thread, that's fine
+                    println!("Fact-check classifier already initialized (race condition)");
+                    true
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize fact-check classifier: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize ModernBERT feedback detector classifier
+///
+/// This initializes the feedback-detector ModernBERT model for classifying
+/// user feedback from follow-up messages.
+///
+/// Model outputs:
+/// - 0: SAT (satisfied)
+/// - 1: NEED_CLARIFICATION
+/// - 2: WRONG_ANSWER
+/// - 3: WANT_DIFFERENT
+///
+/// # Safety
+/// - `model_id` must be a valid null-terminated C string
+/// - Caller must ensure proper memory management
+///
+/// # Returns
+/// `true` if initialization succeeds, `false` otherwise
+#[no_mangle]
+pub extern "C" fn init_feedback_detector(model_id: *const c_char, use_cpu: bool) -> bool {
+    // Check if already initialized - return true if so (idempotent)
+    if FEEDBACK_DETECTOR_CLASSIFIER.get().is_some() {
+        println!("Feedback detector already initialized");
+        return true;
+    }
+
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    println!("🔧 Initializing feedback detector: {}", model_id);
+
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory(model_id, use_cpu) {
+        Ok(model) => {
+            match FEEDBACK_DETECTOR_CLASSIFIER.set(Arc::new(model)) {
+                Ok(_) => {
+                    println!("Feedback detector initialized successfully");
+                    true
+                }
+                Err(_) => {
+                    println!("Feedback detector already initialized (race condition)");
+                    true
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize feedback detector: {}", e);
+            false
+        }
+    }
+}
+
 /// Initialize DeBERTa v3 jailbreak/prompt injection classifier
 ///
 /// This initializes the ProtectAI DeBERTa v3 Base Prompt Injection model
@@ -409,7 +1049,7 @@ pub extern "C" fn init_deberta_jailbreak_classifier(
     ) {
         Ok(classifier) => match DEBERTA_JAILBREAK_CLASSIFIER.set(Arc::new(classifier)) {
             Ok(_) => {
-                println!("✓ DeBERTa v3 jailbreak classifier initialized successfully");
+                println!("DeBERTa v3 jailbreak classifier initialized successfully");
                 true
             }
             Err(_) => {
@@ -604,7 +1244,6 @@ pub extern "C" fn init_candle_bert_classifier(
     num_classes: i32,
     use_cpu: bool,
 ) -> bool {
-    // Migrated from lib.rs:1555-1578
     let model_path = unsafe {
         match CStr::from_ptr(model_path).to_str() {
             Ok(s) => s,
@@ -612,20 +1251,46 @@ pub extern "C" fn init_candle_bert_classifier(
         }
     };
 
-    // Initialize TraditionalBertClassifier
-    match crate::model_architectures::traditional::bert::TraditionalBertClassifier::new(
-        model_path,
-        num_classes as usize,
-        use_cpu,
-    ) {
-        Ok(_classifier) => {
-            // Store in global static (would need to add this to the lazy_static block)
+    // Intelligent model type detection (same as token classifier)
+    let model_type = detect_model_type(model_path);
 
-            true
+    match model_type {
+        ModelType::LoRA => {
+            // Check if already initialized
+            if LORA_INTENT_CLASSIFIER.get().is_some() {
+                return true; // Already initialized, return success
+            }
+
+            // Route to LoRA intent classifier initialization
+            match crate::classifiers::lora::intent_lora::IntentLoRAClassifier::new(
+                model_path, use_cpu,
+            ) {
+                Ok(classifier) => LORA_INTENT_CLASSIFIER.set(Arc::new(classifier)).is_ok(),
+                Err(e) => {
+                    eprintln!(
+                        "  ERROR: Failed to initialize LoRA intent classifier: {}",
+                        e
+                    );
+                    false
+                }
+            }
         }
-        Err(e) => {
-            eprintln!("Failed to initialize Candle BERT classifier: {}", e);
-            false
+        ModelType::Traditional => {
+            // Initialize TraditionalBertClassifier
+            match crate::model_architectures::traditional::bert::TraditionalBertClassifier::new(
+                model_path,
+                num_classes as usize,
+                use_cpu,
+            ) {
+                Ok(_classifier) => {
+                    // Store in global static (would need to add this to the lazy_static block)
+                    true
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize Candle BERT classifier: {}", e);
+                    false
+                }
+            }
         }
     }
 }
@@ -803,4 +1468,106 @@ pub extern "C" fn init_lora_unified_classifier(
             false
         }
     }
+}
+
+/// Initialize hallucination detection model
+///
+/// This is a ModernBERT-based token classifier for detecting hallucinations
+/// in RAG (Retrieval Augmented Generation) outputs. It classifies each token as
+/// either SUPPORTED (grounded in context) or HALLUCINATED.
+///
+/// # Safety
+/// - `model_path` must be a valid null-terminated C string pointing to the model directory
+#[no_mangle]
+pub extern "C" fn init_hallucination_model(model_path: *const c_char, use_cpu: bool) -> bool {
+    let model_path = unsafe {
+        match CStr::from_ptr(model_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    // Check if already initialized
+    if HALLUCINATION_CLASSIFIER.get().is_some() {
+        println!("Hallucination detection model already initialized");
+        return true;
+    }
+
+    println!(
+        "Initializing hallucination detection model from: {}",
+        model_path
+    );
+
+    // Use TraditionalModernBertTokenClassifier for hallucination detection
+    // Model has: 2 classes (0=SUPPORTED, 1=HALLUCINATED)
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertTokenClassifier::new(
+        model_path,
+        use_cpu,
+    ) {
+        Ok(classifier) => {
+            let success = HALLUCINATION_CLASSIFIER.set(Arc::new(classifier)).is_ok();
+            if success {
+                println!("Hallucination detection model initialized successfully");
+            }
+            success
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize hallucination detection model: {}", e);
+            false
+        }
+    }
+}
+
+/// Initialize ModernBERT NLI (Natural Language Inference) model
+///
+/// This model is used for post-processing hallucination detection results to provide
+/// explanations. It classifies premise-hypothesis pairs into:
+/// - Entailment (0): The premise supports the hypothesis
+/// - Neutral (1): The premise neither supports nor contradicts
+/// - Contradiction (2): The premise contradicts the hypothesis
+///
+/// Recommended model: tasksource/ModernBERT-base-nli
+///
+/// # Safety
+/// - `model_path` must be a valid null-terminated C string pointing to the model directory
+#[no_mangle]
+pub extern "C" fn init_nli_model(model_path: *const c_char, use_cpu: bool) -> bool {
+    let model_path = unsafe {
+        match CStr::from_ptr(model_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    // Check if already initialized
+    if NLI_CLASSIFIER.get().is_some() {
+        println!("NLI model already initialized");
+        return true;
+    }
+
+    println!("Initializing NLI model from: {}", model_path);
+
+    // Use TraditionalModernBertClassifier for ModernBERT NLI
+    match crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier::load_from_directory(
+        model_path,
+        use_cpu,
+    ) {
+        Ok(classifier) => {
+            let success = NLI_CLASSIFIER.set(Arc::new(classifier)).is_ok();
+            if success {
+                println!("NLI model (ModernBERT) initialized successfully");
+            }
+            success
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize NLI model: {}", e);
+            false
+        }
+    }
+}
+
+/// Check if NLI model is initialized
+#[no_mangle]
+pub extern "C" fn is_nli_model_initialized() -> bool {
+    NLI_CLASSIFIER.get().is_some()
 }

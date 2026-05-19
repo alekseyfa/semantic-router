@@ -9,3 +9,7 @@
 *.gif binary
 *.ico binary
 *.svg binary
+*.pdf binary
+
+# Prebuilt CK Flash Attention shared library (ROCm/gfx942)
+onnx-binding/ort-ck-flash-attn/prebuilt/libort_ck_flash_attn.so* binary

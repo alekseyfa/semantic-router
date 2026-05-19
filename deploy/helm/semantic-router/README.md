@@ -6,6 +6,37 @@ A Helm chart for deploying Semantic Router - an intelligent routing system for L
 
 **Homepage:** <https://github.com/vllm-project/semantic-router>
 
+## Dependencies and one-click deployment
+
+This Helm chart supports deploying the full semantic-router stack via dependencies, including semantic cache and observability components. Dependencies are disabled by default; enable them as needed.
+
+### Dependency toggles (`values.yaml`)
+
+- Semantic cache dependency (Redis or Milvus)
+- Response API dependency (Milvus or Redis)
+- Observability dependency (Jaeger / Prometheus / Grafana)
+
+> Note: The Redis storage backend for the Response API is not implemented yet. Enabling it will cause startup failures.
+
+### Example
+
+```
+dependencies:
+  semanticCache:
+    redis:
+      enabled: true
+  responseApi:
+    milvus:
+      enabled: true
+  observability:
+    jaeger:
+      enabled: true
+    prometheus:
+      enabled: true
+    grafana:
+      enabled: true
+```
+
 ## CRD Management
 
 This Helm chart includes Custom Resource Definitions (CRDs) in the `crds/` directory:
@@ -228,6 +259,7 @@ kubectl apply -f deploy/helm/semantic-router/crds/
 | env[0].value | string | `"/app/lib"` |  |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | global.namespace | string | `""` | Namespace for all resources (if not specified, uses Release.Namespace) |
+| global.imageRegistry | string | `""` | Optional registry prefix applied to all images (e.g., mirror registry in China) |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | image.repository | string | `"ghcr.io/vllm-project/semantic-router/extproc"` | Image repository |
 | image.tag | string | `"latest"` | Image tag (overrides the image tag whose default is the chart appVersion) |
@@ -238,7 +270,7 @@ kubectl apply -f deploy/helm/semantic-router/crds/
 | ingress.hosts | list | `[{"host":"semantic-router.local","paths":[{"path":"/","pathType":"Prefix","servicePort":8080}]}]` | Ingress hosts configuration |
 | ingress.tls | list | `[]` | Ingress TLS configuration |
 | initContainer.enabled | bool | `true` | Enable init container |
-| initContainer.image | string | `"python:3.11-slim"` | Init container image |
+| initContainer.image | object | `{ "repository": "ghcr.io/vllm-project/semantic-router/model-downloader", "tag": "" (defaults to chart appVersion), "pullPolicy": "IfNotPresent" }` | Init container image |
 | initContainer.models | list | `[{"name":"all-MiniLM-L12-v2","repo":"sentence-transformers/all-MiniLM-L12-v2"},{"name":"category_classifier_modernbert-base_model","repo":"LLM-Semantic-Router/category_classifier_modernbert-base_model"},{"name":"pii_classifier_modernbert-base_model","repo":"LLM-Semantic-Router/pii_classifier_modernbert-base_model"},{"name":"jailbreak_classifier_modernbert-base_model","repo":"LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model"},{"name":"pii_classifier_modernbert-base_presidio_token_model","repo":"LLM-Semantic-Router/pii_classifier_modernbert-base_presidio_token_model"}]` | Models to download |
 | initContainer.resources | object | `{"limits":{"cpu":"1000m","memory":"2Gi"},"requests":{"cpu":"500m","memory":"1Gi"}}` | Resource limits for init container |
 | livenessProbe.enabled | bool | `true` | Enable liveness probe |

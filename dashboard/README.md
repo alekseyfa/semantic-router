@@ -5,7 +5,7 @@ Unified dashboard that brings together Configuration Management, an Interactive 
 ## Goals
 
 - Single landing page for new/existing users
-- Embed Observability (Grafana/Prometheus) and Playground (Open WebUI) via iframes behind a single backend proxy for auth and CORS/CSP control
+- Embed Observability (Grafana/Prometheus) via iframes behind a single backend proxy for auth and CORS/CSP control
 - Read-only configuration viewer powered by the existing Semantic Router Classification API
 - Environment-agnostic: consistent URLs and behavior for local dev, Compose, and K8s
 
@@ -19,8 +19,6 @@ Unified dashboard that brings together Configuration Management, an Interactive 
 - Router metrics and API
   - Metrics at `:9190/metrics` (Prometheus format)
   - Classification API on `:8080` with endpoints like `GET /api/v1`, `GET /config/classification`
-- Open WebUI integration
-  - Pipe in `tools/openwebui-pipe/vllm_semantic_router_pipe.py`
 
 These are sufficient to embed and proxy—no need to duplicate core functionality.
 
@@ -41,7 +39,8 @@ Pages:
 - **Monitoring** (`/monitoring`): Grafana dashboard embedding with custom path input
 - **Config** (`/config`): Real-time configuration viewer with editable panels and save support
 - **Topology** (`/topology`): Visual topology of request flow and model selection using React Flow
-- **Playground** (`/playground`): Open WebUI interface for testing
+- **Playground** (`/playground`): Built-in chat playground for testing
+- **ML Setup** (`/ml-setup`): 3-step wizard for ML model selection — benchmark, train, and generate deployment config
 
 Features:
 
@@ -61,19 +60,46 @@ Config editing:
 - Tools DB panel loads `/api/tools-db`, which serves `tools_db.json` from the same directory as your config file.
 - Note for containers/Kubernetes: if the config is mounted from a read-only ConfigMap, updates won’t persist. Mount a writable volume or manage config externally if you need persistence.
 
+ML Model Selection Setup (`/ml-setup`):
+
+- A 3-step guided wizard for configuring ML-based intelligent request routing:
+  - **Step 1 — Benchmark**: Upload a models YAML and queries JSONL file, then run benchmarks against your LLMs to collect performance data. Real-time progress via SSE with per-query granularity.
+  - **Step 2 — Train**: Select one or more ML algorithms (KNN, K-Means, SVM, MLP) and train classifiers on the benchmark data. Trained model files are saved to a fixed `ml-train/` directory under the ML pipeline data path. The Device selector (CPU/CUDA) is shown only when MLP is selected.
+  - **Step 3 — Configure**: Define routing decisions (name, priority, algorithm, domains, model names) and generate a deployment-ready `ml-model-selection-values.yaml`. The generated YAML follows the semantic-router config schema and can be merged into your `config.yaml` for online inference.
+- The ML pipeline data directory (`data/ml-pipeline/`) is created automatically at server startup. Subdirectories (`ml-train/`, `ml-benchmark-<id>/`, `ml-config-<id>/`) are created dynamically when each flow runs.
+- Supports two execution modes:
+  - **Subprocess mode** (default): Runs Python scripts directly via `python3` — no additional services needed.
+  - **HTTP mode**: Connects to a Python ML service sidecar (set `ML_SERVICE_URL=http://ml-service:8686`), with SSE-based progress streaming.
+
+Read-only dashboard mode:
+
+- Enable via CLI: `vllm-sr serve --readonly`
+- Or set env: `DASHBOARD_READONLY=true`
+- Effects:
+  - Frontend hides add/edit/delete actions and shows a read-only banner
+  - Backend rejects write APIs with `403 Forbidden` for:
+    - `POST /api/router/config/update`
+    - `POST /api/router/config/defaults/update`
+
 ### Backend (Go HTTP Server)
 
 - Serves static frontend (Vite production build)
 - Reverse proxy with auth/cors/csp controls:
   - `GET /embedded/grafana/*` → Grafana
   - `GET /embedded/prometheus/*` → Prometheus (optional link-outs)
-  - `GET /embedded/openwebui/*` → Open WebUI (optional)
   - `GET /api/router/*` → Router Classification API (`:8080`)
   - `GET /metrics/router` → Router `/metrics` (optional aggregation later)
   - `GET /api/router/config/all` → Returns your `config.yaml` as JSON (parsed from YAML)
   - `POST /api/router/config/update` → Updates your `config.yaml` (writes YAML)
   - `GET /api/tools-db` → Returns `tools_db.json` next to your config
   - `GET /healthz` → Health check endpoint
+  - `POST /api/ml-pipeline/benchmark` → Start a benchmark job (multipart: models YAML + queries JSONL)
+  - `POST /api/ml-pipeline/train` → Start a training job on benchmark data
+  - `POST /api/ml-pipeline/config` → Generate deployment-ready YAML config
+  - `GET /api/ml-pipeline/jobs` → List all ML pipeline jobs
+  - `GET /api/ml-pipeline/jobs/{id}` → Get job status and output files
+  - `GET /api/ml-pipeline/stream/{id}` → SSE stream for real-time job progress
+  - `GET /api/ml-pipeline/download/{id}/{filename}` → Download job output files
 - Normalizes headers for iframe embedding: strips/overrides `X-Frame-Options` and `Content-Security-Policy` frame-ancestors as needed
 - SPA routing support: serves `index.html` for all non-asset routes
 - Central point for JWT/OIDC in the future (forward or exchange tokens to upstreams)
@@ -96,8 +122,11 @@ dashboard/
 │   │   │   ├── LandingPage.tsx     # Welcome page with terminal demo
 │   │   │   ├── MonitoringPage.tsx  # Grafana iframe with path control
 │   │   │   ├── ConfigPage.tsx      # Config viewer with API fetch
-│   │   │   ├── PlaygroundPage.tsx  # Open WebUI iframe
+│   │   │   ├── PlaygroundPage.tsx  # Built-in chat playground
+│   │   │   ├── MLSetupPage.tsx     # ML model selection 3-step wizard
 │   │   │   └── *.module.css        # Scoped styles per page
+│   │   ├── hooks/
+│   │   │   └── useMLPipeline.ts    # ML pipeline state management & API hooks
 │   │   ├── App.tsx                 # Root component with routing
 │   │   ├── main.tsx                # Entry point
 │   │   └── index.css               # Global styles & CSS variables
@@ -108,6 +137,8 @@ dashboard/
 │   └── index.html                  # SPA shell
 ├── backend/                         # Go reverse proxy server
 │   ├── main.go                     # Proxy routes & static file server
+│   ├── handlers/mlpipeline.go      # ML pipeline HTTP handlers & SSE streaming
+│   ├── mlpipeline/runner.go        # ML job orchestration (benchmark, train, config gen)
 │   ├── go.mod                      # Go module (minimal dependencies)
 │   └── Dockerfile                  # Multi-stage build (Node + Go + Alpine)
 ├── README.md                        # This file
@@ -125,16 +156,19 @@ Required env vars (with sensible defaults per environment):
 - `TARGET_PROMETHEUS_URL`
 - `TARGET_ROUTER_API_URL` (router `:8080`)
 - `TARGET_ROUTER_METRICS_URL` (router `:9190/metrics`)
-- `TARGET_OPENWEBUI_URL` (optional; enable playground tab only if present)
-  Optional:
+- `TARGET_ENVOY_URL` — Envoy proxy URL for chat completions (e.g., `http://envoy:8801`). Required for Playground chat to work.
+
+Optional:
+
 - `ROUTER_CONFIG_PATH` (default: `../../config/config.yaml`) — path to the router config file used by the config APIs and Tools DB.
 - `DASHBOARD_STATIC_DIR` — override static assets directory (defaults to `../frontend`).
+- `ML_SERVICE_URL` — URL of the Python ML service sidecar for HTTP mode (e.g., `http://ml-service:8686`). If not set, the dashboard uses subprocess mode (runs Python scripts directly).
+- `ML_PIPELINE_ENABLED` — set to `true` to enable ML pipeline features in Docker Compose/K8s deployments.
   Note: The backend already adjusts frame-busting headers (X-Frame-Options/CSP) to allow embedding from the dashboard origin; no extra env flag is required.
 
 Recommended upstream settings for embedding:
 
 - Grafana: set `GF_SECURITY_ALLOW_EMBEDDING=true` and prefer `access: proxy` datasource (already configured)
-- Open WebUI: ensure CSP/frame-ancestors allows embedding, or rely on dashboard proxy to strip/override; configure Open WebUI auth/session to work under proxied path
 
 ## URL strategy (stable, user-facing)
 
@@ -142,7 +176,7 @@ Recommended upstream settings for embedding:
 - Monitoring tab: iframe `src="/embedded/grafana/d/<dashboard-uid>?kiosk&theme=light"`
 - Config tab: frontend fetch `GET /api/router/config/all` (demo edit modals; see note above)
 - Topology tab: client fetch of `GET /api/router/config/all` to render the flow graph
-- Playground tab: iframe `src="/embedded/openwebui/"` (rendered only if `TARGET_OPENWEBUI_URL` is set)
+- Playground tab: built-in chat UI calling the router API (`POST /api/router/v1/chat/completions`)
 
 ## Deployment matrix
 
@@ -155,7 +189,6 @@ Recommended upstream settings for embedding:
   - `TARGET_PROMETHEUS_URL=http://localhost:9090`
   - `TARGET_ROUTER_API_URL=http://localhost:8080`
   - `TARGET_ROUTER_METRICS_URL=http://localhost:9190/metrics`
-  - `TARGET_OPENWEBUI_URL=http://localhost:3001` (if running)
 
 2. Docker Compose (all-in-one)
 
@@ -165,7 +198,6 @@ Recommended upstream settings for embedding:
   - `TARGET_PROMETHEUS_URL=http://prometheus:9090`
   - `TARGET_ROUTER_API_URL=http://semantic-router:8080`
   - `TARGET_ROUTER_METRICS_URL=http://semantic-router:9190/metrics`
-  - `TARGET_OPENWEBUI_URL=http://openwebui:8080` (if included)
 
 3. Kubernetes
 
@@ -176,14 +208,13 @@ Recommended upstream settings for embedding:
   - `TARGET_PROMETHEUS_URL=http://prometheus.<ns>.svc.cluster.local:9090`
   - `TARGET_ROUTER_API_URL=http://semantic-router.<ns>.svc.cluster.local:8080`
   - `TARGET_ROUTER_METRICS_URL=http://semantic-router.<ns>.svc.cluster.local:9190/metrics`
-  - `TARGET_OPENWEBUI_URL=http://openwebui.<ns>.svc.cluster.local:8080` (if installed)
 - Expose the dashboard via Ingress/Gateway to the outside; upstreams remain ClusterIP
 
 ## Security & access control
 
 - MVP: bearer token/JWT support via `Authorization: Bearer <token>` in requests to `/api/router/*` (forwarded to router API)
 - Frame embedding: backend strips/overrides `X-Frame-Options` and `Content-Security-Policy` headers from upstreams to permit `frame-ancestors 'self'` only
-- Future: OIDC login on dashboard, session cookie, and per-route RBAC; signed proxy sessions to Grafana/Open WebUI
+- Future: OIDC login on dashboard, session cookie, and per-route RBAC; signed proxy sessions to embedded services
 
 Write access warning for config updates:
 
@@ -199,7 +230,7 @@ Write access warning for config updates:
 ## Implementation notes
 
 — Backend: Go server with reverse proxies for `/embedded/*` and `/api/router/*`, plus `/api/router/config/all`
-— Frontend: SPA with three tabs and iframes + structured config viewer
+— Frontend: SPA with embedded observability + built-in chat playground + structured config viewer
 — K8s manifests: Deployment + Service + ConfigMap; optional Ingress (add per cluster)
 — Future: OIDC, per-route RBAC, metrics summary endpoint
 

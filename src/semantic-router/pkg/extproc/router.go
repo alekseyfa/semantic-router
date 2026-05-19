@@ -2,182 +2,141 @@ package extproc
 
 import (
 	"encoding/json"
-	"fmt"
+	"strings"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/authz"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/cache"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
-	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/ratelimit"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/selection"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/tools"
-	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/pii"
 )
 
-// OpenAIRouter is an Envoy ExtProc server that routes OpenAI API requests
+// OpenAIRouter is an Envoy ExtProc server that routes OpenAI API requests.
 type OpenAIRouter struct {
 	Config               *config.RouterConfig
 	CategoryDescriptions []string
 	Classifier           *classification.Classifier
-	PIIChecker           *pii.PolicyChecker
 	Cache                cache.CacheBackend
 	ToolsDatabase        *tools.ToolsDatabase
+	ResponseAPIFilter    *ResponseAPIFilter
+	ReplayRecorder       *routerreplay.Recorder
+	// ModelSelector is the registry of advanced model selection algorithms
+	// initialized from config.IntelligentRouting.ModelSelection.
+	ModelSelector   *selection.Registry
+	ReplayRecorders map[string]*routerreplay.Recorder
+	MemoryStore     *memory.MilvusStore
+	MemoryExtractor *memory.MemoryExtractor
+
+	// CredentialResolver resolves per-user LLM API keys from multiple sources
+	// (ext_authz injected headers -> static config fallback).
+	CredentialResolver *authz.CredentialResolver
+
+	// RateLimiter enforces per-user/model rate limits from multiple sources
+	// (Envoy RLS -> local limiter).
+	RateLimiter *ratelimit.RateLimitResolver
 }
 
-// Ensure OpenAIRouter implements the ext_proc calls
+// Ensure OpenAIRouter implements the ext_proc calls.
 var _ ext_proc.ExternalProcessorServer = (*OpenAIRouter)(nil)
 
-// NewOpenAIRouter creates a new OpenAI API router instance
-func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
-	var cfg *config.RouterConfig
-	var err error
+const routerReplayAPIBasePath = "/v1/router_replay"
 
-	// Check if we should use the global config (Kubernetes mode) or parse from file
-	globalCfg := config.Get()
-	if globalCfg != nil && globalCfg.ConfigSource == config.ConfigSourceKubernetes {
-		// Use the global config that's managed by the Kubernetes controller
-		cfg = globalCfg
-		logging.Infof("Using Kubernetes-managed configuration")
-	} else {
-		// Parse fresh config from file for file-based configuration (supports live reload)
-		cfg, err = config.Parse(configPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-		// Update global config reference for packages that rely on config.GetConfig()
-		config.Replace(cfg)
-		logging.Debugf("Parsed configuration from file: %s", configPath)
+// handleRouterReplayAPI serves read-only endpoints for router replay records.
+func (r *OpenAIRouter) handleRouterReplayAPI(method string, path string) *ext_proc.ProcessingResponse {
+	if !r.hasRouterReplayRecorders() {
+		return nil
 	}
 
-	// Load category mapping if classifier is enabled
-	var categoryMapping *classification.CategoryMapping
-	if cfg.CategoryMappingPath != "" {
-		categoryMapping, err = classification.LoadCategoryMapping(cfg.CategoryMappingPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load category mapping: %w", err)
-		}
-		logging.Infof("Loaded category mapping with %d categories", categoryMapping.GetCategoryCount())
+	path = normalizeRouterReplayAPIPath(path)
+
+	switch {
+	case isRouterReplayListPath(path):
+		return r.handleRouterReplayListAPI(method)
+	case strings.HasPrefix(path, routerReplayAPIBasePath+"/"):
+		replayID := strings.TrimPrefix(path, routerReplayAPIBasePath+"/")
+		return r.handleRouterReplayRecordAPI(method, replayID)
+	default:
+		return nil
 	}
-
-	// Load PII mapping if PII classifier is enabled
-	var piiMapping *classification.PIIMapping
-	if cfg.PIIMappingPath != "" {
-		piiMapping, err = classification.LoadPIIMapping(cfg.PIIMappingPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load PII mapping: %w", err)
-		}
-		logging.Infof("Loaded PII mapping with %d PII types", piiMapping.GetPIITypeCount())
-	}
-
-	// Load jailbreak mapping if prompt guard is enabled
-	var jailbreakMapping *classification.JailbreakMapping
-	if cfg.IsPromptGuardEnabled() {
-		jailbreakMapping, err = classification.LoadJailbreakMapping(cfg.PromptGuard.JailbreakMappingPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load jailbreak mapping: %w", err)
-		}
-		logging.Infof("Loaded jailbreak mapping with %d jailbreak types", jailbreakMapping.GetJailbreakTypeCount())
-	}
-
-	// Initialize the BERT model for similarity search
-	if initErr := candle_binding.InitModel(cfg.BertModel.ModelID, cfg.BertModel.UseCPU); initErr != nil {
-		return nil, fmt.Errorf("failed to initialize BERT model: %w", initErr)
-	}
-
-	categoryDescriptions := cfg.GetCategoryDescriptions()
-	logging.Infof("Category descriptions: %v", categoryDescriptions)
-
-	// Create semantic cache with config options
-	cacheConfig := cache.CacheConfig{
-		BackendType:         cache.CacheBackendType(cfg.SemanticCache.BackendType),
-		Enabled:             cfg.SemanticCache.Enabled,
-		SimilarityThreshold: cfg.GetCacheSimilarityThreshold(),
-		MaxEntries:          cfg.SemanticCache.MaxEntries,
-		TTLSeconds:          cfg.SemanticCache.TTLSeconds,
-		EvictionPolicy:      cache.EvictionPolicyType(cfg.SemanticCache.EvictionPolicy),
-		BackendConfigPath:   cfg.SemanticCache.BackendConfigPath,
-		EmbeddingModel:      cfg.SemanticCache.EmbeddingModel,
-	}
-
-	// Use default backend type if not specified
-	if cacheConfig.BackendType == "" {
-		cacheConfig.BackendType = cache.InMemoryCacheType
-	}
-
-	semanticCache, err := cache.NewCacheBackend(cacheConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create semantic cache: %w", err)
-	}
-
-	if semanticCache.IsEnabled() {
-		logging.Infof("Semantic cache enabled (backend: %s) with threshold: %.4f, TTL: %d seconds",
-			cacheConfig.BackendType, cacheConfig.SimilarityThreshold, cacheConfig.TTLSeconds)
-		if cacheConfig.BackendType == cache.InMemoryCacheType {
-			logging.Infof("In-memory cache max entries: %d", cacheConfig.MaxEntries)
-		}
-	} else {
-		logging.Infof("Semantic cache is disabled")
-	}
-
-	// Create tools database with config options
-	toolsThreshold := cfg.BertModel.Threshold // Default to BERT threshold
-	if cfg.Tools.SimilarityThreshold != nil {
-		toolsThreshold = *cfg.Tools.SimilarityThreshold
-	}
-	toolsOptions := tools.ToolsDatabaseOptions{
-		SimilarityThreshold: toolsThreshold,
-		Enabled:             cfg.Tools.Enabled,
-	}
-	toolsDatabase := tools.NewToolsDatabase(toolsOptions)
-
-	// Load tools from file if enabled and path is provided
-	if toolsDatabase.IsEnabled() && cfg.Tools.ToolsDBPath != "" {
-		if loadErr := toolsDatabase.LoadToolsFromFile(cfg.Tools.ToolsDBPath); loadErr != nil {
-			logging.Warnf("Failed to load tools from file %s: %v", cfg.Tools.ToolsDBPath, loadErr)
-		}
-		logging.Infof("Tools database enabled with threshold: %.4f, top-k: %d",
-			toolsThreshold, cfg.Tools.TopK)
-	} else {
-		logging.Infof("Tools database is disabled")
-	}
-
-	// Create utility components
-	piiChecker := pii.NewPolicyChecker(cfg)
-
-	classifier, err := classification.NewClassifier(cfg, categoryMapping, piiMapping, jailbreakMapping)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create classifier: %w", err)
-	}
-
-	// Create global classification service for API access with auto-discovery
-	// This will prioritize LoRA models over legacy ModernBERT
-	autoSvc, err := services.NewClassificationServiceWithAutoDiscovery(cfg)
-	if err != nil {
-		logging.Warnf("Auto-discovery failed during router initialization: %v, using legacy classifier", err)
-		services.NewClassificationService(classifier, cfg)
-	} else {
-		logging.Infof("Router initialization: Using auto-discovered unified classifier")
-		// The service is already set as global in NewUnifiedClassificationService
-		_ = autoSvc
-	}
-
-	router := &OpenAIRouter{
-		Config:               cfg,
-		CategoryDescriptions: categoryDescriptions,
-		Classifier:           classifier,
-		PIIChecker:           piiChecker,
-		Cache:                semanticCache,
-		ToolsDatabase:        toolsDatabase,
-	}
-
-	return router, nil
 }
 
-// createJSONResponseWithBody creates a direct response with pre-marshaled JSON body
+func (r *OpenAIRouter) hasRouterReplayRecorders() bool {
+	return len(r.ReplayRecorders) > 0 || r.ReplayRecorder != nil
+}
+
+func normalizeRouterReplayAPIPath(path string) string {
+	if idx := strings.Index(path, "?"); idx != -1 {
+		return path[:idx]
+	}
+	return path
+}
+
+func isRouterReplayListPath(path string) bool {
+	return path == routerReplayAPIBasePath || path == routerReplayAPIBasePath+"/"
+}
+
+func (r *OpenAIRouter) handleRouterReplayListAPI(method string) *ext_proc.ProcessingResponse {
+	if method != "GET" {
+		return r.createErrorResponse(405, "method not allowed")
+	}
+
+	records := r.collectRouterReplayRecords()
+	payload := map[string]interface{}{
+		"object": "router_replay.list",
+		"count":  len(records),
+		"data":   records,
+	}
+	return r.createJSONResponse(200, payload)
+}
+
+func (r *OpenAIRouter) collectRouterReplayRecords() []routerreplay.RoutingRecord {
+	var records []routerreplay.RoutingRecord
+	for _, recorder := range r.ReplayRecorders {
+		records = append(records, recorder.ListAllRecords()...)
+	}
+	if len(records) == 0 && r.ReplayRecorder != nil {
+		return r.ReplayRecorder.ListAllRecords()
+	}
+	return records
+}
+
+func (r *OpenAIRouter) handleRouterReplayRecordAPI(method string, replayID string) *ext_proc.ProcessingResponse {
+	if method != "GET" {
+		return r.createErrorResponse(405, "method not allowed")
+	}
+	if replayID == "" {
+		return r.createErrorResponse(400, "replay id is required")
+	}
+
+	record, ok := r.findRouterReplayRecord(replayID)
+	if !ok {
+		return r.createErrorResponse(404, "replay record not found")
+	}
+	return r.createJSONResponse(200, record)
+}
+
+func (r *OpenAIRouter) findRouterReplayRecord(replayID string) (routerreplay.RoutingRecord, bool) {
+	for _, recorder := range r.ReplayRecorders {
+		if record, ok := recorder.GetRecord(replayID); ok {
+			return record, true
+		}
+	}
+	if r.ReplayRecorder != nil {
+		return r.ReplayRecorder.GetRecord(replayID)
+	}
+	return routerreplay.RoutingRecord{}, false
+}
+
+// createJSONResponseWithBody creates a direct response with pre-marshaled JSON body.
 func (r *OpenAIRouter) createJSONResponseWithBody(statusCode int, jsonBody []byte) *ext_proc.ProcessingResponse {
 	return &ext_proc.ProcessingResponse{
 		Response: &ext_proc.ProcessingResponse_ImmediateResponse{
@@ -201,7 +160,7 @@ func (r *OpenAIRouter) createJSONResponseWithBody(statusCode int, jsonBody []byt
 	}
 }
 
-// createJSONResponse creates a direct response with JSON content
+// createJSONResponse creates a direct response with JSON content.
 func (r *OpenAIRouter) createJSONResponse(statusCode int, data interface{}) *ext_proc.ProcessingResponse {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
@@ -212,7 +171,7 @@ func (r *OpenAIRouter) createJSONResponse(statusCode int, data interface{}) *ext
 	return r.createJSONResponseWithBody(statusCode, jsonData)
 }
 
-// createErrorResponse creates a direct error response
+// createErrorResponse creates a direct error response.
 func (r *OpenAIRouter) createErrorResponse(statusCode int, message string) *ext_proc.ProcessingResponse {
 	errorResp := map[string]interface{}{
 		"error": map[string]interface{}{
@@ -226,15 +185,32 @@ func (r *OpenAIRouter) createErrorResponse(statusCode int, message string) *ext_
 	if err != nil {
 		logging.Errorf("Failed to marshal error response: %v", err)
 		jsonData = []byte(`{"error":{"message":"Internal server error","type":"internal_error","code":500}}`)
-		// Use 500 status code for fallback error
 		statusCode = 500
 	}
 
 	return r.createJSONResponseWithBody(statusCode, jsonData)
 }
 
-// shouldClearRouteCache checks if route cache should be cleared
+// shouldClearRouteCache checks if route cache should be cleared.
 func (r *OpenAIRouter) shouldClearRouteCache() bool {
-	// Check if feature is enabled
 	return r.Config.ClearRouteCache
+}
+
+// LoadToolsDatabase loads tools from file after embedding models are initialized.
+func (r *OpenAIRouter) LoadToolsDatabase() error {
+	if !r.ToolsDatabase.IsEnabled() {
+		return nil
+	}
+
+	if r.Config.Tools.ToolsDBPath == "" {
+		logging.Warnf("Tools database enabled but no tools file path configured")
+		return nil
+	}
+
+	if err := r.ToolsDatabase.LoadToolsFromFile(r.Config.Tools.ToolsDBPath); err != nil {
+		return err
+	}
+
+	logging.Infof("Tools database loaded successfully from: %s", r.Config.Tools.ToolsDBPath)
+	return nil
 }

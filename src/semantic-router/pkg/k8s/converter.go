@@ -84,11 +84,13 @@ func (c *CRDConverter) ConvertIntelligentRoute(route *v1alpha1.IntelligentRoute)
 	}
 
 	intelligentRouting := &config.IntelligentRouting{
-		KeywordRules:   make([]config.KeywordRule, 0),
-		EmbeddingRules: make([]config.EmbeddingRule, 0),
-		Categories:     make([]config.Category, 0),
-		Decisions:      make([]config.Decision, 0),
-		Strategy:       "priority", // Always use priority strategy
+		Signals: config.Signals{
+			KeywordRules:   make([]config.KeywordRule, 0),
+			EmbeddingRules: make([]config.EmbeddingRule, 0),
+			Categories:     make([]config.Category, 0),
+		},
+		Decisions: make([]config.Decision, 0),
+		Strategy:  "priority", // Always use priority strategy
 	}
 
 	// Convert keyword signals
@@ -210,22 +212,6 @@ func validatePluginConfiguration(pluginType string, rawConfig []byte) error {
 			return fmt.Errorf("failed to unmarshal semantic-cache config: %w", err)
 		}
 
-	case "jailbreak":
-		var cfg config.JailbreakPluginConfig
-		decoder := json.NewDecoder(bytes.NewReader(rawConfig))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&cfg); err != nil {
-			return fmt.Errorf("failed to unmarshal jailbreak config: %w", err)
-		}
-
-	case "pii":
-		var cfg config.PIIPluginConfig
-		decoder := json.NewDecoder(bytes.NewReader(rawConfig))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&cfg); err != nil {
-			return fmt.Errorf("failed to unmarshal pii config: %w", err)
-		}
-
 	case "system_prompt":
 		var cfg config.SystemPromptPluginConfig
 		decoder := json.NewDecoder(bytes.NewReader(rawConfig))
@@ -261,8 +247,24 @@ func validatePluginConfiguration(pluginType string, rawConfig []byte) error {
 			}
 		}
 
+	case "router_replay":
+		var cfg config.RouterReplayPluginConfig
+		decoder := json.NewDecoder(bytes.NewReader(rawConfig))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cfg); err != nil {
+			return fmt.Errorf("failed to unmarshal router_replay config: %w", err)
+		}
+		if cfg.MaxRecords < 0 {
+			return fmt.Errorf("router_replay max_records cannot be negative")
+		}
+		if cfg.MaxBodyBytes < 0 {
+			return fmt.Errorf("router_replay max_body_bytes cannot be negative")
+		}
+
 	default:
-		return fmt.Errorf("unknown plugin type: %s", pluginType)
+		// Unknown plugin types are passed through without schema validation.
+		// This allows extensibility — only well-known types are validated.
+		return nil
 	}
 
 	return nil

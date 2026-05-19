@@ -2,9 +2,9 @@
 sidebar_position: 2
 ---
 
-# Install in Local
+# Installation
 
-This guide will help you set up and install the Semantic Router on your system. The router runs entirely on CPU and does not require GPU for inference.
+This guide will help you install and run the vLLM Semantic Router. The router runs entirely on CPU and does not require GPU for inference.
 
 ## System Requirements
 
@@ -12,201 +12,224 @@ This guide will help you set up and install the Semantic Router on your system. 
 No GPU required - the router runs efficiently on CPU using optimized BERT models.
 :::
 
-Semantic Router depends on the following software:
+**Requirements:**
 
-- **Go**: V1.24.1 or higher (matches the module requirements)
-- **Rust**: V1.90.0 or higher (for Candle bindings)
-- **Python**: V3.8 or higher (for model downloads)
-- **HuggingFace CLI**: Required for fetching models (`pip install huggingface_hub`)
+- **Python**: 3.10 or higher
+- **Container Runtime**: Docker or Podman (required for running the router container)
 
-## Local Installation
+## Quick Start
 
-### 1. Clone the Repository
+### 1. Use the one-line installer (macOS/Linux)
 
 ```bash
-git clone https://github.com/vllm-project/semantic-router.git
-cd semantic-router
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash
 ```
 
-### 2. Install Dependencies
+The installer:
 
-#### Install Go (if not already installed)
+- Detects Python 3.10 or newer
+- Installs `vllm-sr` into `~/.local/share/vllm-sr`
+- Writes a launcher to `~/.local/bin/vllm-sr`
+- Prepares Docker or Podman for `vllm-sr serve` unless you opt out
+- Starts `vllm-sr serve` automatically and opens the dashboard when possible
+- Prints dashboard access and remote-server hints if a browser cannot be opened
+
+Useful variants:
 
 ```bash
-# Check if Go is installed
-go version
+# Install only the CLI
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash -s -- --mode cli
 
-# If not installed, download from https://golang.org/dl/
-# Or use package manager:
-# macOS: brew install go
-# Ubuntu: sudo apt install golang-go
+# Pin local serve mode to Podman
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash -s -- --runtime podman
+
+# Force the first launch onto the AMD/ROCm path
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash -s -- --platform amd
+
+# Install without auto-starting serve + dashboard
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash -s -- --no-launch
+
+# Skip runtime bootstrap and keep only userland install steps
+curl -fsSL https://vllm-semantic-router.com/install.sh | bash -s -- --runtime skip
 ```
 
-#### Install Rust (if not already installed)
+If `~/.local/bin` is not already on your `PATH`, the installer prints the export line to add it.
+
+Windows users should use the manual PyPI flow below.
+
+### 2. Manual PyPI install
 
 ```bash
-# Check if Rust is installed
-rustc --version
+# Create a virtual environment (recommended)
+python -m venv vsr
+source vsr/bin/activate  # On Windows: vsr\Scripts\activate
 
-# If not installed:
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
+# Install from PyPI
+pip install vllm-sr
 ```
 
-#### Install Python (if not already installed)
+Verify installation:
 
 ```bash
-# Check if Python is installed
-python --version
-
-# If not installed:
-# macOS: brew install python
-# Ubuntu: sudo apt install python3 python3-pip (Tips: need python3.8+)
+vllm-sr --version
 ```
 
-#### Install HuggingFace CLI
+### 3. Restart `vllm-sr` later
 
 ```bash
-pip install huggingface_hub hf_transfer
+vllm-sr serve
 ```
 
-### 3. Build the Project
+If you skipped `--no-launch`, the installer already ran one `vllm-sr serve` for you.
+
+If `config.yaml` does not exist yet in the current directory, `vllm-sr serve` bootstraps a minimal setup config and starts the dashboard in setup mode.
+
+The router will:
+
+- Automatically download required ML models (~1.5GB, one-time)
+- Start the dashboard on port 8700
+- Start Envoy proxy on port 8888 after activation
+- Start the semantic router service after activation
+- Enable metrics on port 9190
+
+### 4. Open the Dashboard
+
+Open [http://localhost:8700](http://localhost:8700) in your browser.
+
+If you ran the installer on a remote server and the browser did not open automatically, use the URL and SSH tunnel hint printed by the installer.
+
+For first-run setup:
+
+1. Configure one or more models.
+2. Choose a routing preset or keep the single-model baseline.
+3. Activate the generated config.
+
+After activation, `config.yaml` is written to the current directory and the router exits setup mode.
+
+### 5. Test the Router
 
 ```bash
-# Build everything (Rust + Go)
-make build
-```
-
-This command will:
-
-- Build the Rust candle-binding library
-- Build the Go router binary
-- Place the executable in `bin/router`
-
-### 4. Download Pre-trained Models
-
-```bash
-# Download all required models (about 1.5GB total)
-make download-models
-```
-
-This downloads the CPU-optimized BERT models for:
-
-- Category classification
-- PII detection
-- Jailbreak detection
-
-:::tip
-`make test` invokes `make download-models` automatically, so you only need to run this step manually the first time or when refreshing the cache.
-:::
-
-### 5. Configure Backend Endpoints
-
-Edit `config/config.yaml` to point to your LLM endpoints:
-
-```yaml
-# Example: Configure your vLLM or Ollama endpoints
-vllm_endpoints:
-  - name: "your-endpoint"
-    address: "127.0.0.1"        # MUST be IP address (IPv4 or IPv6)
-    port: 11434                 # Replace with your port
-    weight: 1
-
-model_config:
-  "your-model-name":            # Replace with your model name
-    pii_policy:
-      allow_by_default: false  # Deny all PII by default
-      pii_types_allowed: ["EMAIL_ADDRESS", "PERSON", "GPE", "PHONE_NUMBER"]  # Only allow these specific PII types
-    preferred_endpoints: ["your-endpoint"]
-```
-
-:::note[**Important: Address Format Requirements**]
-The `address` field **must** contain a valid IP address (IPv4 or IPv6). Domain names are not supported.
-
-**✅ Correct formats:**
-
-- `"127.0.0.1"` (IPv4)
-- `"192.168.1.100"` (IPv4)
-
-**❌ Incorrect formats:**
-
-- `"localhost"` → Use `"127.0.0.1"` instead
-- `"your-server.com"` → Use the server's IP address
-- `"http://127.0.0.1"` → Remove protocol prefix
-- `"127.0.0.1:8080"` → Use separate `port` field
-
-:::
-
-:::note[**Important: Model Name Consistency**]
-The model name in your configuration **must exactly match** the `--served-model-name` parameter used when starting your vLLM server:
-
-```bash
-# When starting vLLM server:
-vllm serve microsoft/phi-4 --port 11434 --served-model-name your-model-name
-
-# The config.yaml must reference the model in model_config:
-model_config:
-  "your-model-name":  # ✅ Must match --served-model-name
-    preferred_endpoints: ["your-endpoint"]
-
-vllm_endpoints:
-  "your-model-name":             # ✅ Must match --served-model-name
-    # ... configuration
-```
-
-If these names don't match, the router won't be able to route requests to your model.
-
-The default configuration includes example endpoints that you should update for your setup.
-:::
-
-## Running the Router
-
-### 1. Start the Services
-
-Open two terminals and run:
-
-**Terminal 1: Start Envoy Proxy**
-
-```bash
-make run-envoy
-```
-
-**Terminal 2: Start Semantic Router**
-
-```bash
-make run-router
-```
-
-### Step 2: Manual Testing
-
-You can also send custom requests:
-
-```bash
-curl -X POST http://localhost:8801/v1/chat/completions \
+curl http://localhost:8888/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "MoM",
-    "messages": [
-      {"role": "user", "content": "What is the derivative of x^2?"}
-    ]
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
-:::tip[VSR Decision Tracking]
-The router automatically adds response headers (`x-vsr-selected-category`, `x-vsr-selected-reasoning`, `x-vsr-selected-model`) to help you understand how requests are being processed. Use `curl -i` to see these headers in action. See [VSR Headers Documentation](../troubleshooting/vsr-headers.md) for details.
-:::
+### 6. Optional: open the dashboard from the CLI
+
+```bash
+vllm-sr dashboard
+```
+
+## Common Commands
+
+```bash
+# View logs
+vllm-sr logs router        # Router logs
+vllm-sr logs envoy         # Envoy logs
+vllm-sr logs router -f     # Follow logs
+
+# Check status
+vllm-sr status
+
+# Stop the router
+vllm-sr stop
+```
+
+## Advanced Configuration
+
+### YAML-first workflow
+
+If you prefer to edit YAML directly instead of using the dashboard setup flow:
+
+```bash
+# Generate a lean advanced sample in the current directory
+vllm-sr init
+
+# Validate it before serving
+vllm-sr validate config.yaml
+```
+
+`vllm-sr init` is optional. It generates an advanced sample and `.vllm-sr/router-defaults.yaml` for YAML-first users. `router-defaults.yaml` contains advanced runtime defaults and is not required for first-run dashboard setup.
+
+### HuggingFace Settings
+
+Set environment variables before starting:
+
+```bash
+export HF_ENDPOINT=https://huggingface.co  # Or mirror: https://hf-mirror.com
+export HF_TOKEN=your_token_here            # Only for gated models
+export HF_HOME=/path/to/cache              # Custom cache directory
+
+vllm-sr serve
+```
+
+### Custom Options
+
+```bash
+# Use custom config file
+vllm-sr serve --config my-config.yaml
+
+# Use custom Docker image
+vllm-sr serve --image ghcr.io/vllm-project/semantic-router/vllm-sr:latest
+
+# Control image pull policy
+vllm-sr serve --image-pull-policy always
+```
+
+## Kubernetes Deployment
+
+For production deployments on Kubernetes or OpenShift, use the **Kubernetes Operator**:
+
+### Quick Start with Operator
+
+```bash
+# Clone repository
+git clone https://github.com/vllm-project/semantic-router
+cd semantic-router/deploy/operator
+
+# Install CRDs and operator
+make install
+make deploy IMG=ghcr.io/vllm-project/semantic-router-operator:latest
+
+# Deploy a semantic router instance
+kubectl apply -f config/samples/vllm_v1alpha1_semanticrouter.yaml
+```
+
+**Benefits:**
+
+- ✅ Declarative configuration using Kubernetes CRDs
+- ✅ Automatic platform detection (OpenShift/Kubernetes)
+- ✅ Built-in high availability and scaling
+- ✅ Integrated monitoring and observability
+- ✅ Lifecycle management and upgrades
+
+See the **[Kubernetes Operator Guide](k8s/operator)** for complete documentation.
+
+### Other Kubernetes Deployment Options
+
+- **[Istio Integration](k8s/istio.md)** - Service mesh deployment
+- **[AI Gateway](k8s/ai-gateway.md)** - Gateway API integration
+- **[Production Stack](k8s/production-stack.md)** - Complete production setup
+- **[Dynamo](k8s/dynamo.md)** - Dynamic configuration management
+
+## Docker Compose
+
+For local development and testing:
+
+- **[Docker Compose](docker-compose.md)** - Quick local deployment
 
 ## Next Steps
 
-After successful installation:
-
-1. **[Configuration Guide](configuration.md)** - Customize your setup and add your own endpoints
-2. **[API Documentation](../api/router.md)** - Detailed API reference
-3. **[VSR Headers](../troubleshooting/vsr-headers.md)** - Understanding router decision tracking headers
+- **[Configuration Guide](configuration.md)** - Advanced routing and signal configuration
+- **[Kubernetes Operator](k8s/operator)** - Production Kubernetes deployment
+- **[API Documentation](../api/router.md)** - Complete API reference
+- **[Tutorials](../tutorials/intelligent-route/keyword-routing.md)** - Learn by example
 
 ## Getting Help
 
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/your-org/semantic-router/issues)
-- **Documentation**: Full documentation at [Read the Docs](https://vllm-semantic-router.com/)
-
-You now have a working Semantic Router that runs entirely on CPU and intelligently routes requests to specialized models!
+- **Issues**: [GitHub Issues](https://github.com/vllm-project/semantic-router/issues)
+- **Community**: Join `#semantic-router` channel in vLLM Slack
+- **Documentation**: [vllm-semantic-router.com](https://vllm-semantic-router.com/)

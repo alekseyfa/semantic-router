@@ -1,0 +1,697 @@
+.container {
+  width: 100%;
+  max-width: 1440px;
+  min-height: calc(100vh - 80px);
+  margin: 0 auto;
+  padding: 1.75rem 2rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  min-height: 420px;
+  color: var(--color-text-secondary);
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 0;
+}
+
+.headerLeft {
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(2rem, 3vw, 2.55rem);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.subtitle {
+  max-width: 54rem;
+  margin: 0.45rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+}
+
+.headerTimestamp {
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.autoRefreshToggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.autoRefreshToggle input {
+  cursor: pointer;
+  accent-color: var(--color-primary);
+}
+
+.refreshButton {
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.refreshButton:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.95rem 1.1rem;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 1rem;
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-danger);
+}
+
+.errorIcon {
+  font-size: 1.25rem;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.05fr) minmax(400px, 1.25fr) minmax(260px, 0.82fr);
+  gap: 1rem;
+}
+
+.summaryCard,
+.servicesSection {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+.summaryCard {
+  min-height: 230px;
+  overflow: hidden;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.cardBody {
+  padding: 1rem 1.2rem 1.15rem;
+}
+
+.cardTitleBlock {
+  min-width: 0;
+}
+
+.cardTitle {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.cardSubtitle {
+  margin: 0.25rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.cardDescription {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.routerHero {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 176px;
+  padding: 1.15rem 1.2rem;
+  border: 1px solid rgba(118, 185, 0, 0.12);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(118, 185, 0, 0.08), rgba(118, 185, 0, 0));
+}
+
+.routerHeroOk {
+  border-color: rgba(34, 197, 94, 0.16);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(118, 185, 0, 0.04));
+}
+
+.routerHeroWarn {
+  border-color: rgba(245, 158, 11, 0.18);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.03));
+}
+
+.routerHeroDown {
+  border-color: rgba(239, 68, 68, 0.18);
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(239, 68, 68, 0.03));
+}
+
+.routerHeroHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.routerHeroLabel,
+.routerHighlightLabel {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.routerHeroMetric {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.routerCopy {
+  min-width: 0;
+}
+
+.routerValue {
+  font-size: clamp(2rem, 3vw, 2.65rem);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.routerNarrative {
+  margin: 0.65rem 0 0;
+  color: var(--color-text-secondary);
+  font-size: 0.94rem;
+  line-height: 1.55;
+}
+
+.routerHighlights {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.routerHighlight {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.8rem 0.85rem;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.routerHighlightValue {
+  color: var(--color-text);
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.toneOkText {
+  color: #86efac;
+}
+
+.toneWarnText {
+  color: #fbbf24;
+}
+
+.toneDownText {
+  color: #f87171;
+}
+
+.statusChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.34rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+
+.modelStatusOk {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.modelStatusWarn {
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.modelStatusDown {
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.modelFacts {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+  padding: 0.9rem 0.95rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+}
+
+.modelFactRow {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 0.75rem;
+}
+
+.factLabel {
+  color: var(--color-text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.factValue {
+  color: var(--color-text);
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+.modelHint {
+  color: var(--color-text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.modelReadyPanel {
+  display: flex;
+  align-items: center;
+  min-height: 128px;
+  margin-top: 1rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  font-size: 0.92rem;
+}
+
+.metaCard {
+  display: flex;
+  flex-direction: column;
+}
+
+.metaGrid {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.metaItem {
+  display: grid;
+  gap: 0.25rem;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.metaItem:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.metaLabel {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.metaValue {
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.servicesSection {
+  overflow: hidden;
+}
+
+.servicesSectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.servicesSectionTitle {
+  display: block;
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.servicesSectionDescription {
+  margin: 0.35rem 0 0;
+  color: var(--color-text-secondary);
+  font-size: 0.86rem;
+}
+
+.servicesHeaderMeta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.servicesCountChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 0.76rem;
+}
+
+.servicesGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 0.9rem;
+  padding: 1rem 1.2rem 1.2rem;
+}
+
+.serviceCard {
+  min-height: 180px;
+  padding: 1rem 1rem 1.05rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-secondary);
+  transition: background 0.2s, border-color 0.2s, transform 0.2s;
+}
+
+.serviceCard:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-hover);
+  transform: translateY(-1px);
+}
+
+.serviceCardHealthy {
+  border-color: rgba(34, 197, 94, 0.16);
+}
+
+.serviceCardUnhealthy {
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.serviceCardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.9rem;
+}
+
+.serviceNameWrap {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.serviceStateDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.serviceStateDotHealthy {
+  background: var(--color-success);
+}
+
+.serviceStateDotUnhealthy {
+  background: var(--color-danger);
+}
+
+.serviceName {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.componentBadge {
+  padding: 0.18rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background: rgba(118, 185, 0, 0.12);
+  color: var(--color-primary-light);
+  border: 1px solid rgba(118, 185, 0, 0.18);
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.serviceHealthChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.34rem 0.58rem;
+  border-radius: 999px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  flex-shrink: 0;
+}
+
+.serviceHealthDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.serviceHealthHealthy {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.2);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.serviceHealthUnhealthy {
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.serviceMessage,
+.serviceMessageMuted {
+  margin: 1rem 0 0;
+  color: var(--color-text);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.serviceMessageMuted {
+  color: var(--color-text-secondary);
+}
+
+.noServices {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  text-align: center;
+}
+
+.noServicesIcon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.noServices h3 {
+  margin: 0 0 0.5rem;
+  color: var(--color-text);
+  font-size: 1.25rem;
+}
+
+.noServices p {
+  margin: 0 0 1.5rem;
+  color: var(--color-text-secondary);
+}
+
+.startOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.startOption {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+}
+
+.startOption strong {
+  min-width: 100px;
+  color: var(--color-text);
+}
+
+.startOption code {
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--color-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 1280px) {
+  .summaryGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .metaCard {
+    grid-column: 1 / -1;
+  }
+
+  .routerHighlights {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .headerRight {
+    justify-content: flex-start;
+  }
+
+  .summaryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .metaCard {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: 1rem 0.9rem 1.5rem;
+  }
+
+  .title {
+    font-size: clamp(1.8rem, 9vw, 2.4rem);
+  }
+
+  .servicesSectionHeader {
+    flex-direction: column;
+  }
+
+  .servicesHeaderMeta {
+    justify-content: flex-start;
+  }
+
+  .servicesGrid {
+    grid-template-columns: 1fr;
+    padding: 0.9rem;
+  }
+
+  .routerHero {
+    padding: 1rem;
+  }
+
+  .serviceCardTop {
+    flex-direction: column;
+  }
+
+  .modelFactRow {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+}

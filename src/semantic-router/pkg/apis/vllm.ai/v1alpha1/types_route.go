@@ -50,6 +50,53 @@ type Signals struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=14
 	Domains []DomainSignal `json:"domains,omitempty" yaml:"domains,omitempty"`
+
+	// FactCheckRules defines fact-check rules for signal classification
+	// Similar to KeywordRules and EmbeddingRules, but based on ML model classification
+	// Each rule has a name that can be referenced in decision conditions
+	// +optional
+	ContextRules []ContextRule `json:"contextRules,omitempty" yaml:"context_rules,omitempty"`
+
+	// +optional
+	FactCheckRules []FactCheckRule `json:"factCheckRules,omitempty" yaml:"fact_check_rules,omitempty"`
+}
+
+// FactCheckRule defines a rule for fact-check signal classification
+// The classifier determines if a query needs fact verification based on the ML model
+// Predefined signal names: "needs_fact_check", "no_fact_check_needed"
+// Threshold is read from hallucination_mitigation.fact_check_model.threshold
+type FactCheckRule struct {
+	// Name is the signal name that can be referenced in decision rules
+	// e.g., "needs_fact_check" or "no_fact_check_needed"
+	Name string `json:"name" yaml:"name"`
+
+	// Description provides human-readable explanation of when this signal is triggered
+	// +optional
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// ContextRule defines a rule for context-based (token count) classification
+type ContextRule struct {
+	// Name is the signal name (e.g., "high_token_count")
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=100
+	Name string `json:"name" yaml:"name"`
+
+	// MinTokens is the minimum token count (supports K/M suffixes)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?[KMkm]?$`
+	MinTokens string `json:"minTokens" yaml:"min_tokens"`
+
+	// MaxTokens is the maximum token count (supports K/M suffixes)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?[KMkm]?$`
+	MaxTokens string `json:"maxTokens" yaml:"max_tokens"`
+
+	// Description provides human-readable explanation
+	// +optional
+	// +kubebuilder:validation:MaxLength=500
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
 // DomainSignal defines a domain category for classification
@@ -157,9 +204,10 @@ type Decision struct {
 
 // SignalCombination defines how to combine multiple signals
 type SignalCombination struct {
-	// Operator defines the logical operator for combining conditions (AND/OR)
+	// Operator defines the logical operator for combining conditions (AND/OR/NOT)
+	// NOT uses NOR semantics: matches only when none of the conditions match.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=AND;OR
+	// +kubebuilder:validation:Enum=AND;OR;NOT
 	Operator string `json:"operator" yaml:"operator"`
 
 	// Conditions defines the list of signal conditions
@@ -171,12 +219,13 @@ type SignalCombination struct {
 
 // SignalCondition defines a single signal condition
 type SignalCondition struct {
-	// Type defines the type of signal (keyword/embedding/domain)
+	// Type defines the type of signal (keyword/embedding/domain/fact_check/context)
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=keyword;embedding;domain
+	// +kubebuilder:validation:Enum=keyword;embedding;domain;fact_check;context
 	Type string `json:"type" yaml:"type"`
 
 	// Name is the name of the signal to reference
+	// For fact_check type, use "needs_fact_check" to match queries that need fact verification
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=100
@@ -214,9 +263,9 @@ type ModelRef struct {
 
 // DecisionPlugin defines a plugin configuration for a decision
 type DecisionPlugin struct {
-	// Type is the plugin type (semantic-cache, jailbreak, pii, system_prompt, header_mutation)
+	// Type is the plugin type (semantic-cache, jailbreak, pii, system_prompt, header_mutation, hallucination, router_replay)
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=semantic-cache;jailbreak;pii;system_prompt;header_mutation
+	// +kubebuilder:validation:Enum=semantic-cache;jailbreak;pii;system_prompt;header_mutation;hallucination;router_replay
 	Type string `json:"type" yaml:"type"`
 
 	// Configuration is the plugin-specific configuration as a raw JSON object

@@ -5,26 +5,54 @@ config:
   clear_route_cache: true
   default_model: llama3-8b
   # Enable domain classification to return the x-vsr-selected-category header
+  # Using LoRA models for better performance with auto-detection
   classifier:
     category_model:
-      model_id: models/category_classifier_modernbert-base_model
+      model_id: "models/mom-domain-classifier"
+      use_modernbert: false  # MoM uses LoRA-based model
       threshold: 0.6
-      use_modernbert: true
-      category_mapping_path: models/category_classifier_modernbert-base_model/category_mapping.json
+      use_cpu: true
+      category_mapping_path: "models/mom-domain-classifier/category_mapping.json"
     pii_model:
       model_id: ""
       threshold: 1.0
       use_modernbert: false
       pii_mapping_path: ""
-  # Optional domains used by decision rules
+  # All 14 categories from LoRA intent classifier
   categories:
-    - name: math
-      description: "Mathematics, arithmetic, calculation"
+    - name: business
+      description: "Business management, marketing, entrepreneurship"
+    - name: philosophy
+      description: "Ethics, logic, metaphysics, epistemology"
+    - name: biology
+      description: "Genetics, evolution, ecology, anatomy"
+    - name: health
+      description: "Medicine, nutrition, fitness, diseases"
     - name: computer science
       description: "Computer networks, programming, systems"
+    - name: engineering
+      description: "Mechanical, electrical, civil engineering"
+    - name: psychology
+      description: "Behavior, cognition, mental health"
+    - name: math
+      description: "Mathematics, arithmetic, calculation"
+    - name: chemistry
+      description: "Chemical reactions, compounds, periodic table"
+    - name: physics
+      description: "Mechanics, thermodynamics, quantum physics"
+    - name: history
+      description: "Historical events, civilizations, wars"
+    - name: law
+      description: "Legal systems, regulations, court procedures"
+    - name: economics
+      description: "Microeconomics, macroeconomics, financial markets"
+    - name: other
+      description: "General knowledge and miscellaneous topics"
+
   decisions:
-    - name: math_route
-      priority: 20
+    # Decision names match E2E test expectations (*_decision format)
+    - name: math_decision
+      priority: 100
       rules:
         operator: OR
         conditions:
@@ -33,8 +61,9 @@ config:
       modelRefs:
         - model: phi4-mini
           use_reasoning: false
-    - name: cs_route
-      priority: 10
+
+    - name: computer_science_decision
+      priority: 100
       rules:
         operator: OR
         conditions:
@@ -43,7 +72,130 @@ config:
       modelRefs:
         - model: llama3-8b
           use_reasoning: false
-    - name: default_route
+
+    - name: physics_decision
+      priority: 50
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: physics
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: chemistry_decision
+      priority: 50
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: chemistry
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: biology_decision
+      priority: 50
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: biology
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: engineering_decision
+      priority: 50
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: engineering
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: health_decision
+      priority: 50
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: health
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: psychology_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: psychology
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: economics_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: economics
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: business_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: business
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: history_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: history
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: philosophy_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: philosophy
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    - name: law_decision
+      priority: 40
+      rules:
+        operator: OR
+        conditions:
+          - type: domain
+            name: law
+      modelRefs:
+        - model: llama3-8b
+          use_reasoning: false
+
+    # Default fallback
+    - name: other_decision
       priority: 1
       rules:
         operator: OR
@@ -53,6 +205,7 @@ config:
       modelRefs:
         - model: llama3-8b
           use_reasoning: false
+
   semantic_cache:
     enabled: false
   prompt_guard:
@@ -60,7 +213,7 @@ config:
   tools:
     enabled: false
   bert_model:
-    model_id: models/all-MiniLM-L12-v2
+    model_id: models/mom-embedding-light
     threshold: 0.6
     use_cpu: true
 

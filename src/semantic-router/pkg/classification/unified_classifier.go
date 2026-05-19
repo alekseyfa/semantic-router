@@ -1,7 +1,8 @@
+//go:build !windows && cgo
+
 package classification
 
 /*
-#cgo LDFLAGS: -L../../../../../candle-binding/target/release -lcandle_semantic_router
 #include <stdlib.h>
 #include <stdbool.h>
 
@@ -412,7 +413,7 @@ func (uc *UnifiedClassifier) initializeLoRABindings() error {
 		return fmt.Errorf("loRA model paths not configured")
 	}
 
-	logging.Infof("Initializing LoRA models: Intent=%s, PII=%s, Security=%s, Architecture=%s",
+	logging.Debugf("Initializing LoRA models: Intent=%s, PII=%s, Jailbreak=%s, Architecture=%s",
 		uc.loraModelPaths.IntentPath, uc.loraModelPaths.PIIPath, uc.loraModelPaths.SecurityPath, uc.loraModelPaths.Architecture)
 
 	// Convert Go strings to C strings

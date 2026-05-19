@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch: # Allow manual triggering
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pre-commit:
     if: github.repository == 'vllm-project/semantic-router'
@@ -32,7 +36,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: 23
+          node-version: 20
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -48,9 +52,15 @@ jobs:
             build-essential \
             pkg-config \
             shellcheck
-          npm install -g markdownlint-cli
+          npm install -g markdownlint-cli@0.43.0
           pip install --user yamllint codespell
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.5.0
+
+      - name: Set up golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          install-mode: binary
+          args: --help
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -94,8 +104,20 @@ jobs:
       - name: Install pre-commit
         run: make precommit-install
 
+      - name: Install agent tooling
+        run: python3 -m pip install -r tools/agent/requirements.txt
+
       - name: Run Code Spell Check
         run: make codespell
+
+      - name: Run agent fast gate on changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            export AGENT_BASE_REF="origin/${{ github.base_ref }}"
+          else
+            export AGENT_BASE_REF="HEAD^"
+          fi
+          make agent-fast-gate
 
       - name: Run pre-commit check
         run: make precommit-check

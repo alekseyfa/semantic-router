@@ -169,6 +169,7 @@ tools:
 				Expect(cfg.Tools.Enabled).To(BeTrue())
 				Expect(cfg.Tools.TopK).To(Equal(5))
 				Expect(*cfg.Tools.SimilarityThreshold).To(Equal(float32(0.8)))
+				Expect(cfg.Tools.AdvancedFiltering).To(BeNil())
 
 				// Verify vLLM endpoints config
 				Expect(cfg.VLLMEndpoints).To(HaveLen(2))
@@ -197,12 +198,174 @@ tools:
 			})
 		})
 
+		Context("with advanced tool filtering configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+bert_model:
+  model_id: "test-bert-model"
+  threshold: 0.8
+  use_cpu: true
+
+decisions:
+  - name: "general"
+    priority: 100
+    rules:
+      operator: AND
+      conditions:
+        - type: keyword
+          name: general_keywords
+    modelRefs:
+      - model: "model-a"
+        use_reasoning: true
+
+default_model: "model-b"
+
+tools:
+  enabled: true
+  top_k: 5
+  similarity_threshold: 0.8
+  tools_db_path: "/path/to/tools.json"
+  fallback_to_empty: true
+  advanced_filtering:
+    enabled: true
+    candidate_pool_size: 20
+    min_lexical_overlap: 1
+    min_combined_score: 0.35
+    weights:
+      embed: 0.7
+      lexical: 0.2
+      tag: 0.05
+      name: 0.05
+      category: 0.1
+    use_category_filter: true
+    category_confidence_threshold: 0.6
+    allow_tools: ["get_weather"]
+    block_tools: ["send_email"]
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should parse advanced tool filtering settings", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cfg).NotTo(BeNil())
+
+				Expect(cfg.Tools.AdvancedFiltering).NotTo(BeNil())
+				advanced := cfg.Tools.AdvancedFiltering
+				Expect(advanced.Enabled).To(BeTrue())
+				Expect(*advanced.CandidatePoolSize).To(Equal(20))
+				Expect(*advanced.MinLexicalOverlap).To(Equal(1))
+				Expect(*advanced.MinCombinedScore).To(BeNumerically("~", 0.35, 0.0001))
+				Expect(advanced.UseCategoryFilter).NotTo(BeNil())
+				Expect(*advanced.UseCategoryFilter).To(BeTrue())
+				Expect(*advanced.CategoryConfidenceThreshold).To(BeNumerically("~", 0.6, 0.0001))
+
+				Expect(advanced.Weights.Embed).NotTo(BeNil())
+				Expect(*advanced.Weights.Embed).To(BeNumerically("~", 0.7, 0.0001))
+				Expect(*advanced.Weights.Lexical).To(BeNumerically("~", 0.2, 0.0001))
+				Expect(*advanced.Weights.Tag).To(BeNumerically("~", 0.05, 0.0001))
+				Expect(*advanced.Weights.Name).To(BeNumerically("~", 0.05, 0.0001))
+				Expect(*advanced.Weights.Category).To(BeNumerically("~", 0.1, 0.0001))
+
+				Expect(advanced.AllowTools).To(ContainElement("get_weather"))
+				Expect(advanced.BlockTools).To(ContainElement("send_email"))
+			})
+		})
+
+		Context("with invalid advanced tool filtering configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+decisions:
+  - name: "general"
+    priority: 100
+    rules:
+      operator: AND
+      conditions:
+        - type: keyword
+          name: general_keywords
+    modelRefs:
+      - model: "model-a"
+        use_reasoning: true
+
+default_model: "model-b"
+
+tools:
+  enabled: true
+  top_k: 5
+  tools_db_path: "/path/to/tools.json"
+  fallback_to_empty: true
+  advanced_filtering:
+    enabled: true
+    min_combined_score: 1.5
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should reject out-of-range values", func() {
+				_, err := Load(configFile)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("min_combined_score must be between 0.0 and 1.0"))
+			})
+		})
+
 		Context("with missing config file", func() {
 			It("should return an error", func() {
 				cfg, err := Load("/nonexistent/config.yaml")
 				Expect(err).To(HaveOccurred())
 				Expect(cfg).To(BeNil())
 				Expect(err.Error()).To(ContainSubstring("failed to read config file"))
+			})
+		})
+
+		Context("with observability metrics configuration", func() {
+			It("should default to enabled when metrics block is omitted", func() {
+				configContent := `
+observability:
+  tracing:
+    enabled: false
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cfg.Observability.Metrics.Enabled).To(BeNil())
+			})
+
+			It("should honor explicit metrics disable flag", func() {
+				configContent := `
+observability:
+  metrics:
+    enabled: false
+  tracing:
+    enabled: false
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cfg.Observability.Metrics.Enabled).NotTo(BeNil())
+				Expect(*cfg.Observability.Metrics.Enabled).To(BeFalse())
+			})
+
+			It("should honor explicit metrics enable flag", func() {
+				configContent := `
+observability:
+  metrics:
+    enabled: true
+  tracing:
+    enabled: false
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cfg.Observability.Metrics.Enabled).NotTo(BeNil())
+				Expect(*cfg.Observability.Metrics.Enabled).To(BeTrue())
 			})
 		})
 
@@ -408,10 +571,9 @@ default_model: "fallback-model"
 			})
 
 			It("should return the default model", func() {
-				// This should fail validation since decisions must have at least one model
+				// Empty modelRefs is now allowed - decisions without models are valid
 				_, err := Load(configFile)
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("has no modelRefs defined"))
+				Expect(err).NotTo(HaveOccurred())
 			})
 		})
 	})
@@ -833,7 +995,8 @@ default_model: "model-b"
 					Expect(err).NotTo(HaveOccurred())
 
 					// model-a has preferred endpoints
-					endpointAddress, found := cfg.SelectBestEndpointAddressForModel("model-a")
+					endpointAddress, found, addrErr := cfg.SelectBestEndpointAddressForModel("model-a")
+					Expect(addrErr).NotTo(HaveOccurred())
 					Expect(found).To(BeTrue())
 					Expect(endpointAddress).To(MatchRegexp(`127\.0\.0\.1:\d+`))
 				})
@@ -843,7 +1006,8 @@ default_model: "model-b"
 					Expect(err).NotTo(HaveOccurred())
 
 					// model-c has no preferred_endpoints configured
-					endpointAddress, found := cfg.SelectBestEndpointAddressForModel("model-c")
+					endpointAddress, found, addrErr := cfg.SelectBestEndpointAddressForModel("model-c")
+					Expect(addrErr).NotTo(HaveOccurred())
 					Expect(found).To(BeFalse())
 					Expect(endpointAddress).To(BeEmpty())
 				})
@@ -852,10 +1016,315 @@ default_model: "model-b"
 					cfg, err := Load(configFile)
 					Expect(err).NotTo(HaveOccurred())
 
-					endpointAddress, found := cfg.SelectBestEndpointAddressForModel("non-existent-model")
+					endpointAddress, found, addrErr := cfg.SelectBestEndpointAddressForModel("non-existent-model")
+					Expect(addrErr).NotTo(HaveOccurred())
 					Expect(found).To(BeFalse())
 					Expect(endpointAddress).To(BeEmpty())
 				})
+			})
+		})
+
+		Describe("SelectBestEndpointWithDetailsForModel", func() {
+			It("should return address and endpoint name for model with single endpoint", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// model-b has a single preferred endpoint: endpoint2
+				address, endpointName, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("model-b")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(address).To(Equal("127.0.0.1:8000"))
+				Expect(endpointName).To(Equal("endpoint2"))
+			})
+
+			It("should return the highest-weight endpoint for model with multiple endpoints", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// model-a has endpoint1 (weight 1) and endpoint3 (weight 1)
+				// Both have the same weight, so we get one of them
+				address, endpointName, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("model-a")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(address).To(Equal("127.0.0.1:8000"))
+				Expect(endpointName).To(BeElementOf("endpoint1", "endpoint3"))
+			})
+
+			It("should return false for non-existent model", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				address, endpointName, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("non-existent-model")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeFalse())
+				Expect(address).To(BeEmpty())
+				Expect(endpointName).To(BeEmpty())
+			})
+
+			It("should return false for model with no preferred endpoints", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// model-c has no preferred endpoints configured
+				address, endpointName, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("model-c")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeFalse())
+				Expect(address).To(BeEmpty())
+				Expect(endpointName).To(BeEmpty())
+			})
+
+			It("should select the endpoint with the highest weight when weights differ", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "ep-low"
+    address: "10.0.0.1"
+    port: 9000
+    weight: 1
+  - name: "ep-high"
+    address: "10.0.0.2"
+    port: 9001
+    weight: 10
+
+model_config:
+  "weighted-model":
+    preferred_endpoints: ["ep-low", "ep-high"]
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "weighted-model"
+        score: 0.9
+
+default_model: "weighted-model"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				address, endpointName, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("weighted-model")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(address).To(Equal("10.0.0.2:9001"))
+				Expect(endpointName).To(Equal("ep-high"))
+			})
+		})
+
+		Describe("ResolveExternalModelID", func() {
+			It("should resolve external model ID for vllm endpoint type", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "vllm-ep"
+    address: "127.0.0.1"
+    port: 8000
+    type: "vllm"
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["vllm-ep"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-14B-Instruct"
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				resolved := cfg.ResolveExternalModelID("my-alias", "vllm-ep")
+				Expect(resolved).To(Equal("Qwen/Qwen2.5-14B-Instruct"))
+			})
+
+			It("should default to vllm type when endpoint has no type set", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "no-type-ep"
+    address: "127.0.0.1"
+    port: 8000
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["no-type-ep"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-14B-Instruct"
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Endpoint has no type, so defaults to "vllm"
+				resolved := cfg.ResolveExternalModelID("my-alias", "no-type-ep")
+				Expect(resolved).To(Equal("Qwen/Qwen2.5-14B-Instruct"))
+			})
+
+			It("should default to vllm type when endpoint name does not exist", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "real-ep"
+    address: "127.0.0.1"
+    port: 8000
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["real-ep"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-14B-Instruct"
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Non-existent endpoint name falls back to "vllm" type
+				resolved := cfg.ResolveExternalModelID("my-alias", "non-existent-ep")
+				Expect(resolved).To(Equal("Qwen/Qwen2.5-14B-Instruct"))
+			})
+
+			It("should resolve correct type for ollama endpoint", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "ollama-ep"
+    address: "127.0.0.1"
+    port: 11434
+    type: "ollama"
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["ollama-ep"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-14B-Instruct"
+      ollama: "qwen2.5:14b"
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				resolved := cfg.ResolveExternalModelID("my-alias", "ollama-ep")
+				Expect(resolved).To(Equal("qwen2.5:14b"))
+			})
+
+			It("should return original model name when no external_model_ids configured", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Using the base fixture which has no external_model_ids
+				resolved := cfg.ResolveExternalModelID("model-a", "endpoint1")
+				Expect(resolved).To(Equal("model-a"))
+			})
+
+			It("should return original model name for non-existent model", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				resolved := cfg.ResolveExternalModelID("non-existent-model", "endpoint1")
+				Expect(resolved).To(Equal("non-existent-model"))
+			})
+
+			It("should return original model name when endpoint type has no mapping", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "custom-ep"
+    address: "127.0.0.1"
+    port: 8000
+    type: "openrouter"
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["custom-ep"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-14B-Instruct"
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Endpoint type is "openrouter" but external_model_ids only has "vllm"
+				resolved := cfg.ResolveExternalModelID("my-alias", "custom-ep")
+				Expect(resolved).To(Equal("my-alias"))
+			})
+
+			It("should return original model name when config is nil", func() {
+				var nilCfg *RouterConfig
+				resolved := nilCfg.ResolveExternalModelID("some-model", "some-endpoint")
+				Expect(resolved).To(Equal("some-model"))
+			})
+
+			It("should return original model name when external_model_ids map is empty", func() {
+				configContent := `
+vllm_endpoints:
+  - name: "ep1"
+    address: "127.0.0.1"
+    port: 8000
+
+model_config:
+  "my-alias":
+    preferred_endpoints: ["ep1"]
+    external_model_ids: {}
+
+categories:
+  - name: "test"
+    model_scores:
+      - model: "my-alias"
+        score: 0.9
+
+default_model: "my-alias"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				resolved := cfg.ResolveExternalModelID("my-alias", "ep1")
+				Expect(resolved).To(Equal("my-alias"))
 			})
 		})
 
@@ -953,10 +1422,8 @@ default_model: "test-model"
 					Expect(err).NotTo(HaveOccurred())
 					Expect(cfg.VLLMEndpoints[0].Address).To(Equal("::1"))
 				})
-			})
 
-			Context("with invalid address formats", func() {
-				It("should reject domain names", func() {
+				It("should accept domain names", func() {
 					configContent := `
 vllm_endpoints:
   - name: "endpoint1"
@@ -980,175 +1447,9 @@ default_model: "test-model"
 					err := os.WriteFile(configFile, []byte(configContent), 0o644)
 					Expect(err).NotTo(HaveOccurred())
 
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("endpoint1"))
-					Expect(err.Error()).To(ContainSubstring("address validation failed"))
-					Expect(err.Error()).To(ContainSubstring("invalid IP address format"))
-				})
-
-				It("should reject protocol prefixes", func() {
-					configContent := `
-vllm_endpoints:
-  - name: "endpoint1"
-    address: "http://127.0.0.1"
-    port: 8000
-    weight: 1
-
-model_config:
-  "test-model":
-    preferred_endpoints: ["endpoint1"]
-
-categories:
-  - name: "test"
-    model_scores:
-      - model: "test-model"
-        score: 0.9
-        use_reasoning: true
-
-default_model: "test-model"
-`
-					err := os.WriteFile(configFile, []byte(configContent), 0o644)
+					cfg, err := Load(configFile)
 					Expect(err).NotTo(HaveOccurred())
-
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("protocol prefixes"))
-					Expect(err.Error()).To(ContainSubstring("are not supported"))
-				})
-
-				It("should reject addresses with paths", func() {
-					configContent := `
-vllm_endpoints:
-  - name: "endpoint1"
-    address: "127.0.0.1/api"
-    port: 8000
-    weight: 1
-
-model_config:
-  "test-model":
-    preferred_endpoints: ["endpoint1"]
-
-categories:
-  - name: "test"
-    model_scores:
-      - model: "test-model"
-        score: 0.9
-        use_reasoning: true
-
-default_model: "test-model"
-`
-					err := os.WriteFile(configFile, []byte(configContent), 0o644)
-					Expect(err).NotTo(HaveOccurred())
-
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("paths are not supported"))
-				})
-
-				It("should reject addresses with port numbers", func() {
-					configContent := `
-vllm_endpoints:
-  - name: "endpoint1"
-    address: "127.0.0.1:8080"
-    port: 8000
-    weight: 1
-
-model_config:
-  "test-model":
-    preferred_endpoints: ["endpoint1"]
-
-categories:
-  - name: "test"
-    model_scores:
-      - model: "test-model"
-        score: 0.9
-        use_reasoning: true
-
-default_model: "test-model"
-`
-					err := os.WriteFile(configFile, []byte(configContent), 0o644)
-					Expect(err).NotTo(HaveOccurred())
-
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("port numbers in address are not supported"))
-					Expect(err.Error()).To(ContainSubstring("use 'port' field instead"))
-				})
-
-				It("should provide comprehensive error messages", func() {
-					configContent := `
-vllm_endpoints:
-  - name: "test-endpoint"
-    address: "https://example.com"
-    port: 8000
-    weight: 1
-
-model_config:
-  "test-model":
-    preferred_endpoints: ["test-endpoint"]
-
-categories:
-  - name: "test"
-    model_scores:
-      - model: "test-model"
-        score: 0.9
-        use_reasoning: true
-
-default_model: "test-model"
-`
-					err := os.WriteFile(configFile, []byte(configContent), 0o644)
-					Expect(err).NotTo(HaveOccurred())
-
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-
-					errorMsg := err.Error()
-					Expect(errorMsg).To(ContainSubstring("test-endpoint"))
-					Expect(errorMsg).To(ContainSubstring("Supported formats"))
-					Expect(errorMsg).To(ContainSubstring("IPv4: 192.168.1.1"))
-					Expect(errorMsg).To(ContainSubstring("IPv6: ::1"))
-					Expect(errorMsg).To(ContainSubstring("Unsupported formats"))
-					Expect(errorMsg).To(ContainSubstring("Domain names: example.com"))
-					Expect(errorMsg).To(ContainSubstring("Protocol prefixes: http://"))
-				})
-			})
-
-			Context("with multiple endpoints", func() {
-				It("should validate all endpoints", func() {
-					configContent := `
-vllm_endpoints:
-  - name: "endpoint1"
-    address: "127.0.0.1"
-    port: 8000
-    weight: 1
-  - name: "endpoint2"
-    address: "example.com"
-    port: 8001
-    weight: 1
-
-model_config:
-  "test-model1":
-    preferred_endpoints: ["endpoint1"]
-  "test-model2":
-    preferred_endpoints: ["endpoint2"]
-
-categories:
-  - name: "test"
-    model_scores:
-      - model: "test-model1"
-        score: 0.9
-        use_reasoning: true
-
-default_model: "test-model1"
-`
-					err := os.WriteFile(configFile, []byte(configContent), 0o644)
-					Expect(err).NotTo(HaveOccurred())
-
-					_, err = Load(configFile)
-					Expect(err).To(HaveOccurred())
-					Expect(err.Error()).To(ContainSubstring("endpoint2"))
-					Expect(err.Error()).To(ContainSubstring("invalid IP address format"))
+					Expect(cfg.VLLMEndpoints[0].Address).To(Equal("example.com"))
 				})
 			})
 		})
@@ -1182,7 +1483,7 @@ semantic_cache:
 			})
 		})
 
-		Context("with milvus backend configuration", func() {
+		Context("(Deprecated) with file base milvus backend configuration", func() {
 			BeforeEach(func() {
 				configContent := `
 semantic_cache:
@@ -1196,7 +1497,7 @@ semantic_cache:
 				Expect(err).NotTo(HaveOccurred())
 			})
 
-			It("should parse milvus backend configuration correctly", func() {
+			It("should parse file base milvus backend configuration correctly", func() {
 				cfg, err := Load(configFile)
 				Expect(err).NotTo(HaveOccurred())
 
@@ -1208,6 +1509,267 @@ semantic_cache:
 
 				// MaxEntries should be ignored for Milvus backend
 				Expect(cfg.SemanticCache.MaxEntries).To(Equal(0))
+			})
+		})
+
+		Context("with inline milvus backend configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+semantic_cache:
+  enabled: true
+  backend_type: "milvus"
+  similarity_threshold: 0.9
+  ttl_seconds: 7200
+  milvus:
+    connection:
+      host: "localhost"
+      port: 12345
+      database: "semantic_router_cache"
+      timeout: 99
+      auth:
+        enabled: false
+        username: "1234"
+        password: "1234"
+      tls:
+        enabled: false
+        cert_file: ""
+        key_file: ""
+        ca_file: ""
+    collection:
+      name: "semantic_cache"
+      description: "test"
+      vector_field:
+        name: "test"
+        dimension: 384
+        metric_type: "test"
+      index:
+        type: "HNSW"
+        params:
+          M: 16
+          efConstruction: 64
+    search:
+      params:
+        ef: 64
+      topk: 10
+      consistency_level: "Session"
+    performance:
+      connection_pool:
+        max_connections: 10
+        max_idle_connections: 5
+        acquire_timeout: 5
+      batch:
+        insert_batch_size: 1000
+        timeout: 30
+    data_management:
+      ttl:
+        enabled: true
+        timestamp_field: "timestamp"
+        cleanup_interval: 3600
+      compaction:
+        enabled: true
+        interval: 86400
+    logging:
+      level: "info"
+      enable_query_log: false
+      enable_metrics: true
+    development:
+      drop_collection_on_startup: true
+      auto_create_collection: true
+      verbose_errors: true
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should parse inline milvus backend connection configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.Connection).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.Connection.Host).To(Equal("localhost"))
+				Expect(cfg.SemanticCache.Milvus.Connection.Port).To(Equal(12345))
+				Expect(cfg.SemanticCache.Milvus.Connection.Database).To(Equal("semantic_router_cache"))
+				Expect(cfg.SemanticCache.Milvus.Connection.Timeout).To(Equal(99))
+				Expect(cfg.SemanticCache.Milvus.Connection.Auth.Enabled).To(BeFalse())
+				Expect(cfg.SemanticCache.Milvus.Connection.Auth.Username).To(Equal("1234"))
+				Expect(cfg.SemanticCache.Milvus.Connection.Auth.Password).To(Equal("1234"))
+				Expect(cfg.SemanticCache.Milvus.Connection.TLS.Enabled).To(BeFalse())
+				Expect(cfg.SemanticCache.Milvus.Connection.TLS.CertFile).To(Equal(""))
+				Expect(cfg.SemanticCache.Milvus.Connection.TLS.KeyFile).To(Equal(""))
+				Expect(cfg.SemanticCache.Milvus.Connection.TLS.CAFile).To(Equal(""))
+			})
+
+			It("should parse inline milvus backend collection configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.Collection).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.Collection.Name).To(Equal("semantic_cache"))
+				Expect(cfg.SemanticCache.Milvus.Collection.Description).To(Equal("test"))
+				Expect(cfg.SemanticCache.Milvus.Collection.VectorField.Name).To(Equal("test"))
+				Expect(cfg.SemanticCache.Milvus.Collection.VectorField.Dimension).To(Equal(384))
+				Expect(cfg.SemanticCache.Milvus.Collection.VectorField.MetricType).To(Equal("test"))
+				Expect(cfg.SemanticCache.Milvus.Collection.Index.Type).To(Equal("HNSW"))
+				Expect(cfg.SemanticCache.Milvus.Collection.Index.Params.M).To(Equal(16))
+				Expect(cfg.SemanticCache.Milvus.Collection.Index.Params.EfConstruction).To(Equal(64))
+			})
+
+			It("should parse inline milvus backend search configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.Search).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.Search.Params.Ef).To(Equal(64))
+				Expect(cfg.SemanticCache.Milvus.Search.TopK).To(Equal(10))
+				Expect(cfg.SemanticCache.Milvus.Search.ConsistencyLevel).To(Equal("Session"))
+			})
+
+			It("should parse inline milvus backend performance configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.Performance).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.Performance.ConnectionPool.MaxConnections).To(Equal(10))
+				Expect(cfg.SemanticCache.Milvus.Performance.ConnectionPool.MaxIdleConnections).To(Equal(5))
+				Expect(cfg.SemanticCache.Milvus.Performance.ConnectionPool.AcquireTimeout).To(Equal(5))
+				Expect(cfg.SemanticCache.Milvus.Performance.Batch.InsertBatchSize).To(Equal(1000))
+				Expect(cfg.SemanticCache.Milvus.Performance.Batch.Timeout).To(Equal(30))
+			})
+
+			It("should parse inline milvus backend data management configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.DataManagement).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Milvus.DataManagement.TTL.Enabled).To(BeTrue())
+				Expect(cfg.SemanticCache.Milvus.DataManagement.TTL.TimestampField).To(Equal("timestamp"))
+				Expect(cfg.SemanticCache.Milvus.DataManagement.TTL.CleanupInterval).To(Equal(3600))
+				Expect(cfg.SemanticCache.Milvus.DataManagement.Compaction.Enabled).To(BeTrue())
+				Expect(cfg.SemanticCache.Milvus.DataManagement.Compaction.Interval).To(Equal(86400))
+			})
+
+			It("should parse inline milvus backend logging configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.Logging.Level).To(Equal("info"))
+				Expect(cfg.SemanticCache.Milvus.Logging.EnableQueryLog).To(BeFalse())
+				Expect(cfg.SemanticCache.Milvus.Logging.EnableMetrics).To(BeTrue())
+			})
+
+			It("should parse inline milvus backend development configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Milvus.Development.DropCollectionOnStartup).To(BeTrue())
+				Expect(cfg.SemanticCache.Milvus.Development.AutoCreateCollection).To(BeTrue())
+				Expect(cfg.SemanticCache.Milvus.Development.VerboseErrors).To(BeTrue())
+			})
+		})
+
+		Context("with inline redis backend configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+semantic_cache:
+  enabled: true
+  backend_type: "milvus"
+  similarity_threshold: 0.9
+  ttl_seconds: 7200
+  redis:
+    connection:
+      host: "localhost"
+      port: 6379
+      database: 0
+      password: ""
+      timeout: 30
+      tls:
+        enabled: false
+        cert_file: ""
+        key_file: ""
+        ca_file: ""
+    index:
+      name: "semantic_cache_idx"
+      prefix: "doc:"
+      vector_field:
+        name: "embedding"
+        dimension: 384
+        metric_type: "COSINE"
+      index_type: "HNSW"
+      params:
+        M: 16
+        efConstruction: 64
+    search:
+      topk: 1
+    logging:
+      level: "info"
+      enable_query_log: false
+      enable_metrics: true
+    development:
+      drop_index_on_startup: true
+      auto_create_index: true
+      verbose_errors: true
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should parse inline redis backend connection configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Redis).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Redis.Connection).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Redis.Connection.Host).To(Equal("localhost"))
+				Expect(cfg.SemanticCache.Redis.Connection.Port).To(Equal(6379))
+				Expect(cfg.SemanticCache.Redis.Connection.Database).To(Equal(0))
+				Expect(cfg.SemanticCache.Redis.Connection.Password).To(Equal(""))
+				Expect(cfg.SemanticCache.Redis.Connection.Timeout).To(Equal(30))
+				Expect(cfg.SemanticCache.Redis.Connection.TLS.Enabled).To(BeFalse())
+				Expect(cfg.SemanticCache.Redis.Connection.TLS.CertFile).To(Equal(""))
+				Expect(cfg.SemanticCache.Redis.Connection.TLS.KeyFile).To(Equal(""))
+				Expect(cfg.SemanticCache.Redis.Connection.TLS.CAFile).To(Equal(""))
+			})
+
+			It("should parse inline redis backend index configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Redis.Index).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Redis.Index.Name).To(Equal("semantic_cache_idx"))
+				Expect(cfg.SemanticCache.Redis.Index.Prefix).To(Equal("doc:"))
+				Expect(cfg.SemanticCache.Redis.Index.VectorField.Name).To(Equal("embedding"))
+				Expect(cfg.SemanticCache.Redis.Index.VectorField.Dimension).To(Equal(384))
+				Expect(cfg.SemanticCache.Redis.Index.VectorField.MetricType).To(Equal("COSINE"))
+				Expect(cfg.SemanticCache.Redis.Index.IndexType).To(Equal("HNSW"))
+				Expect(cfg.SemanticCache.Redis.Index.Params.M).To(Equal(16))
+				Expect(cfg.SemanticCache.Redis.Index.Params.EfConstruction).To(Equal(64))
+			})
+
+			It("should parse inline redis backend search configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Redis.Search).ToNot(BeNil())
+				Expect(cfg.SemanticCache.Redis.Search.TopK).To(Equal(1))
+			})
+
+			It("should parse inline redis backend logging configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Redis.Logging.Level).To(Equal("info"))
+				Expect(cfg.SemanticCache.Redis.Logging.EnableQueryLog).To(BeFalse())
+				Expect(cfg.SemanticCache.Redis.Logging.EnableMetrics).To(BeTrue())
+			})
+
+			It("should parse inline redis backend development configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.SemanticCache.Redis.Development.DropIndexOnStartup).To(BeTrue())
+				Expect(cfg.SemanticCache.Redis.Development.AutoCreateIndex).To(BeTrue())
+				Expect(cfg.SemanticCache.Redis.Development.VerboseErrors).To(BeTrue())
 			})
 		})
 
@@ -1676,35 +2238,35 @@ default_model: "test-model"
 		})
 	})
 
-	Describe("IsJailbreakEnabledForDecision", func() {
-		Context("when global jailbreak is enabled", func() {
-			It("should return true for decision without explicit setting", func() {
+	Describe("IsCacheEnabledForDecision", func() {
+		Context("per-decision plugin scoping", func() {
+			It("should return false for decision without explicit semantic-cache plugin (even if global is enabled)", func() {
 				decision := Decision{
 					Name:      "test",
 					ModelRefs: []ModelRef{{Model: "test"}},
+					// No semantic-cache plugin configured
 				}
 
 				cfg := &RouterConfig{
-					InlineModels: InlineModels{
-						PromptGuard: PromptGuardConfig{
-							Enabled: true,
-						},
+					SemanticCache: SemanticCache{
+						Enabled: true, // Global enabled, but should not affect decisions without plugin
 					},
 					IntelligentRouting: IntelligentRouting{
 						Decisions: []Decision{decision},
 					},
 				}
 
-				Expect(cfg.IsJailbreakEnabledForDecision("test")).To(BeTrue())
+				// Per-decision scoping: no plugin = no semantic caching
+				Expect(cfg.IsCacheEnabledForDecision("test")).To(BeFalse())
 			})
 
-			It("should return false when decision explicitly disables jailbreak", func() {
+			It("should return false when decision explicitly disables semantic-cache", func() {
 				decision := Decision{
 					Name:      "test",
 					ModelRefs: []ModelRef{{Model: "test"}},
 					Plugins: []DecisionPlugin{
 						{
-							Type: "jailbreak",
+							Type: "semantic-cache",
 							Configuration: map[string]interface{}{
 								"enabled": false,
 							},
@@ -1713,26 +2275,24 @@ default_model: "test-model"
 				}
 
 				cfg := &RouterConfig{
-					InlineModels: InlineModels{
-						PromptGuard: PromptGuardConfig{
-							Enabled: true,
-						},
+					SemanticCache: SemanticCache{
+						Enabled: true,
 					},
 					IntelligentRouting: IntelligentRouting{
 						Decisions: []Decision{decision},
 					},
 				}
 
-				Expect(cfg.IsJailbreakEnabledForDecision("test")).To(BeFalse())
+				Expect(cfg.IsCacheEnabledForDecision("test")).To(BeFalse())
 			})
 
-			It("should return true when decision explicitly enables jailbreak", func() {
+			It("should return true when decision explicitly enables semantic-cache", func() {
 				decision := Decision{
 					Name:      "test",
 					ModelRefs: []ModelRef{{Model: "test"}},
 					Plugins: []DecisionPlugin{
 						{
-							Type: "jailbreak",
+							Type: "semantic-cache",
 							Configuration: map[string]interface{}{
 								"enabled": true,
 							},
@@ -1741,17 +2301,86 @@ default_model: "test-model"
 				}
 
 				cfg := &RouterConfig{
-					InlineModels: InlineModels{
-						PromptGuard: PromptGuardConfig{
-							Enabled: true,
-						},
+					SemanticCache: SemanticCache{
+						Enabled: false, // Global disabled, but decision enables it
 					},
 					IntelligentRouting: IntelligentRouting{
 						Decisions: []Decision{decision},
 					},
 				}
 
-				Expect(cfg.IsJailbreakEnabledForDecision("test")).To(BeTrue())
+				Expect(cfg.IsCacheEnabledForDecision("test")).To(BeTrue())
+			})
+
+			It("should return false for non-existent decision", func() {
+				cfg := &RouterConfig{
+					SemanticCache: SemanticCache{
+						Enabled: true,
+					},
+				}
+
+				Expect(cfg.IsCacheEnabledForDecision("non_existent")).To(BeFalse())
+			})
+
+			It("should use decision-level similarity threshold when configured", func() {
+				threshold := float32(0.95)
+				decision := Decision{
+					Name:      "test",
+					ModelRefs: []ModelRef{{Model: "test"}},
+					Plugins: []DecisionPlugin{
+						{
+							Type: "semantic-cache",
+							Configuration: map[string]interface{}{
+								"enabled":              true,
+								"similarity_threshold": threshold,
+							},
+						},
+					},
+				}
+
+				globalThreshold := float32(0.80)
+				cfg := &RouterConfig{
+					SemanticCache: SemanticCache{
+						Enabled:             true,
+						SimilarityThreshold: &globalThreshold,
+					},
+					IntelligentRouting: IntelligentRouting{
+						Decisions: []Decision{decision},
+					},
+				}
+
+				// Should use decision-level threshold, not global
+				Expect(cfg.GetCacheSimilarityThresholdForDecision("test")).To(Equal(threshold))
+			})
+
+			It("should use decision-level TTL when configured", func() {
+				ttl := 7200
+				decision := Decision{
+					Name:      "test",
+					ModelRefs: []ModelRef{{Model: "test"}},
+					Plugins: []DecisionPlugin{
+						{
+							Type: "semantic-cache",
+							Configuration: map[string]interface{}{
+								"enabled":     true,
+								"ttl_seconds": ttl,
+							},
+						},
+					},
+				}
+
+				cfg := &RouterConfig{
+					SemanticCache: SemanticCache{
+						Enabled:    true,
+						TTLSeconds: 3600, // Global TTL
+					},
+					IntelligentRouting: IntelligentRouting{
+						Decisions: []Decision{decision},
+					},
+				}
+
+				// Should use decision-level TTL, not global
+				Expect(cfg.GetCacheTTLSecondsForDecision("test")).To(Equal(ttl))
 			})
 		})
 	})
@@ -1971,7 +2600,7 @@ var _ = Describe("IP Address Validation", func() {
 				for _, addr := range domainPortAddresses {
 					err := validateIPAddress(addr)
 					Expect(err).To(HaveOccurred(), "Expected %s to be rejected", addr)
-					// 这些会被域名检测捕获，而不是端口检测
+					// These will be caught by domain detection, not port detection
 					Expect(err.Error()).To(ContainSubstring("invalid IP address format"))
 				}
 			})
@@ -2007,69 +2636,6 @@ var _ = Describe("IP Address Validation", func() {
 					Expect(err).To(HaveOccurred(), "Expected %s to be rejected", format)
 					Expect(err.Error()).To(ContainSubstring("invalid IP address format"))
 				}
-			})
-		})
-	})
-
-	Describe("validateVLLMEndpoints", func() {
-		Context("with valid endpoints", func() {
-			It("should accept endpoints with valid IP addresses", func() {
-				endpoints := []VLLMEndpoint{
-					{
-						Name:    "endpoint1",
-						Address: "127.0.0.1",
-						Port:    8000,
-					},
-					{
-						Name:    "endpoint2",
-						Address: "::1",
-						Port:    8001,
-					},
-				}
-
-				err := validateVLLMEndpoints(endpoints)
-				Expect(err).NotTo(HaveOccurred())
-			})
-		})
-
-		Context("with invalid endpoints", func() {
-			It("should reject endpoints with domain names", func() {
-				endpoints := []VLLMEndpoint{
-					{
-						Name:    "invalid-endpoint",
-						Address: "example.com",
-						Port:    8000,
-					},
-				}
-
-				err := validateVLLMEndpoints(endpoints)
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("invalid-endpoint"))
-				Expect(err.Error()).To(ContainSubstring("address validation failed"))
-				Expect(err.Error()).To(ContainSubstring("Supported formats"))
-				Expect(err.Error()).To(ContainSubstring("IPv4: 192.168.1.1"))
-				Expect(err.Error()).To(ContainSubstring("IPv6: ::1"))
-				Expect(err.Error()).To(ContainSubstring("Unsupported formats"))
-			})
-
-			It("should provide detailed error messages", func() {
-				endpoints := []VLLMEndpoint{
-					{
-						Name:    "test-endpoint",
-						Address: "http://127.0.0.1",
-						Port:    8000,
-					},
-				}
-
-				err := validateVLLMEndpoints(endpoints)
-				Expect(err).To(HaveOccurred())
-
-				errorMsg := err.Error()
-				Expect(errorMsg).To(ContainSubstring("test-endpoint"))
-				Expect(errorMsg).To(ContainSubstring("protocol prefixes"))
-				Expect(errorMsg).To(ContainSubstring("Domain names: example.com, localhost"))
-				Expect(errorMsg).To(ContainSubstring("Protocol prefixes: http://, https://"))
-				Expect(errorMsg).To(ContainSubstring("use 'port' field instead"))
 			})
 		})
 	})
@@ -2347,3 +2913,778 @@ func ResetConfig() {
 	config = nil
 	configErr = nil
 }
+
+var _ = Describe("Hallucination Mitigation Configuration", func() {
+	var (
+		tempDir    string
+		configFile string
+	)
+
+	BeforeEach(func() {
+		var err error
+		tempDir, err = os.MkdirTemp("", "hallucination_config_test")
+		Expect(err).NotTo(HaveOccurred())
+		configFile = filepath.Join(tempDir, "config.yaml")
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tempDir)
+		ResetConfig()
+	})
+
+	Describe("HallucinationMitigationConfig Parsing", func() {
+		Context("with full hallucination mitigation configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+hallucination_mitigation:
+  enabled: true
+  fact_check_model:
+    model_id: "models/fact_check_classifier"
+    threshold: 0.75
+    use_cpu: true
+  hallucination_model:
+    model_id: "models/hallucination_detect_modernbert"
+    threshold: 0.6
+    use_cpu: true
+  on_hallucination_detected: "block"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should parse hallucination mitigation configuration correctly", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.HallucinationMitigation.Enabled).To(BeTrue())
+				Expect(cfg.HallucinationMitigation.FactCheckModel.ModelID).To(Equal("models/fact_check_classifier"))
+				Expect(cfg.HallucinationMitigation.FactCheckModel.Threshold).To(Equal(float32(0.75)))
+				Expect(cfg.HallucinationMitigation.FactCheckModel.UseCPU).To(BeTrue())
+				Expect(cfg.HallucinationMitigation.HallucinationModel.ModelID).To(Equal("models/hallucination_detect_modernbert"))
+				Expect(cfg.HallucinationMitigation.HallucinationModel.Threshold).To(Equal(float32(0.6)))
+				Expect(cfg.HallucinationMitigation.HallucinationModel.UseCPU).To(BeTrue())
+				Expect(cfg.HallucinationMitigation.OnHallucinationDetected).To(Equal("block"))
+			})
+		})
+
+		Context("with minimal hallucination mitigation configuration", func() {
+			BeforeEach(func() {
+				configContent := `
+hallucination_mitigation:
+  enabled: true
+  fact_check_model:
+    model_id: "models/fact_check"
+    mapping_path: "config/mapping.json"
+  hallucination_model:
+    model_id: "models/hallucination"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should parse with default values for optional fields", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.HallucinationMitigation.Enabled).To(BeTrue())
+				Expect(cfg.HallucinationMitigation.FactCheckModel.Threshold).To(Equal(float32(0)))
+				Expect(cfg.HallucinationMitigation.HallucinationModel.Threshold).To(Equal(float32(0)))
+				Expect(cfg.HallucinationMitigation.OnHallucinationDetected).To(BeEmpty())
+			})
+		})
+
+		Context("with hallucination mitigation disabled", func() {
+			BeforeEach(func() {
+				configContent := `
+hallucination_mitigation:
+  enabled: false
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should have enabled set to false", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.HallucinationMitigation.Enabled).To(BeFalse())
+			})
+		})
+
+		Context("with missing hallucination_mitigation section", func() {
+			BeforeEach(func() {
+				configContent := `
+default_model: "test-model"
+`
+				err := os.WriteFile(configFile, []byte(configContent), 0o644)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should have hallucination mitigation disabled by default", func() {
+				cfg, err := Load(configFile)
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(cfg.HallucinationMitigation.Enabled).To(BeFalse())
+				Expect(cfg.HallucinationMitigation.FactCheckModel.ModelID).To(BeEmpty())
+				Expect(cfg.HallucinationMitigation.HallucinationModel.ModelID).To(BeEmpty())
+			})
+		})
+	})
+
+	Describe("IsHallucinationMitigationEnabled", func() {
+		It("should return true when enabled is true", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = true
+
+			Expect(cfg.IsHallucinationMitigationEnabled()).To(BeTrue())
+		})
+
+		It("should return false when enabled is false", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = false
+
+			Expect(cfg.IsHallucinationMitigationEnabled()).To(BeFalse())
+		})
+
+		It("should return false for zero-value config", func() {
+			cfg := &RouterConfig{}
+
+			Expect(cfg.IsHallucinationMitigationEnabled()).To(BeFalse())
+		})
+	})
+
+	Describe("IsFactCheckClassifierEnabled", func() {
+		It("should return true when fully configured with legacy config", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = true
+			cfg.HallucinationMitigation.FactCheckModel.ModelID = "models/fact_check"
+
+			Expect(cfg.IsFactCheckClassifierEnabled()).To(BeTrue())
+		})
+
+		It("should return true when fact_check_rules are configured", func() {
+			cfg := &RouterConfig{}
+			cfg.FactCheckRules = []FactCheckRule{
+				{Name: "needs_fact_check", Description: "Query needs fact verification"},
+				{Name: "no_fact_check_needed", Description: "Query does not need fact verification"},
+			}
+			cfg.HallucinationMitigation.FactCheckModel.ModelID = "models/fact_check"
+
+			Expect(cfg.IsFactCheckClassifierEnabled()).To(BeTrue())
+		})
+
+		It("should return false when hallucination mitigation is disabled and no fact_check_rules", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = false
+			cfg.HallucinationMitigation.FactCheckModel.ModelID = "models/fact_check"
+
+			Expect(cfg.IsFactCheckClassifierEnabled()).To(BeFalse())
+		})
+
+		It("should return false when model_id is missing", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = true
+
+			Expect(cfg.IsFactCheckClassifierEnabled()).To(BeFalse())
+		})
+	})
+
+	Describe("GetFactCheckRules", func() {
+		It("should return all configured fact_check_rules", func() {
+			cfg := &RouterConfig{}
+			cfg.FactCheckRules = []FactCheckRule{
+				{Name: "needs_fact_check", Description: "Needs verification"},
+				{Name: "no_fact_check_needed", Description: "No verification needed"},
+			}
+
+			rules := cfg.GetFactCheckRules()
+			Expect(rules).To(HaveLen(2))
+			Expect(rules[0].Name).To(Equal("needs_fact_check"))
+			Expect(rules[1].Name).To(Equal("no_fact_check_needed"))
+		})
+
+		It("should return empty slice when no rules configured", func() {
+			cfg := &RouterConfig{}
+
+			rules := cfg.GetFactCheckRules()
+			Expect(rules).To(BeEmpty())
+		})
+	})
+
+	Describe("IsHallucinationModelEnabled", func() {
+		It("should return true when fully configured", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = true
+			cfg.HallucinationMitigation.HallucinationModel.ModelID = "models/hallucination"
+
+			Expect(cfg.IsHallucinationModelEnabled()).To(BeTrue())
+		})
+
+		It("should return false when hallucination mitigation is disabled", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = false
+			cfg.HallucinationMitigation.HallucinationModel.ModelID = "models/hallucination"
+
+			Expect(cfg.IsHallucinationModelEnabled()).To(BeFalse())
+		})
+
+		It("should return false when model_id is missing", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.Enabled = true
+
+			Expect(cfg.IsHallucinationModelEnabled()).To(BeFalse())
+		})
+	})
+
+	Describe("GetFactCheckThreshold", func() {
+		It("should return configured threshold when set", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.FactCheckModel.Threshold = 0.85
+
+			Expect(cfg.GetFactCheckThreshold()).To(Equal(float32(0.85)))
+		})
+
+		It("should return default 0.7 when threshold is not set", func() {
+			cfg := &RouterConfig{}
+
+			Expect(cfg.GetFactCheckThreshold()).To(Equal(float32(0.7)))
+		})
+
+		It("should return default 0.7 when threshold is zero", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.FactCheckModel.Threshold = 0
+
+			Expect(cfg.GetFactCheckThreshold()).To(Equal(float32(0.7)))
+		})
+	})
+
+	Describe("GetHallucinationModelThreshold", func() {
+		It("should return configured threshold when set", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.HallucinationModel.Threshold = 0.65
+
+			Expect(cfg.GetHallucinationModelThreshold()).To(Equal(float32(0.65)))
+		})
+
+		It("should return default 0.5 when threshold is not set", func() {
+			cfg := &RouterConfig{}
+
+			Expect(cfg.GetHallucinationModelThreshold()).To(Equal(float32(0.5)))
+		})
+
+		It("should return default 0.5 when threshold is zero", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.HallucinationModel.Threshold = 0
+
+			Expect(cfg.GetHallucinationModelThreshold()).To(Equal(float32(0.5)))
+		})
+	})
+
+	Describe("GetHallucinationAction", func() {
+		It("should return 'warn' when action is 'warn'", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.OnHallucinationDetected = "warn"
+
+			Expect(cfg.GetHallucinationAction()).To(Equal("warn"))
+		})
+
+		It("should return 'warn' when action is 'block' (only warn is supported for global config)", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.OnHallucinationDetected = "block"
+
+			// Global config only supports "warn" action
+			// Per-decision plugin config supports "header", "body", "none", "block"
+			Expect(cfg.GetHallucinationAction()).To(Equal("warn"))
+		})
+
+		It("should return default 'warn' when action is empty", func() {
+			cfg := &RouterConfig{}
+
+			Expect(cfg.GetHallucinationAction()).To(Equal("warn"))
+		})
+
+		It("should return default 'warn' when action is invalid", func() {
+			cfg := &RouterConfig{}
+			cfg.HallucinationMitigation.OnHallucinationDetected = "invalid"
+
+			Expect(cfg.GetHallucinationAction()).To(Equal("warn"))
+		})
+	})
+
+	Describe("Decision.GetMemoryConfig", func() {
+		It("should return nil when no memory plugin is configured", func() {
+			decision := &Decision{
+				Name: "test_decision",
+				Plugins: []DecisionPlugin{
+					{Type: "pii", Configuration: map[string]interface{}{"enabled": true}},
+				},
+			}
+
+			Expect(decision.GetMemoryConfig()).To(BeNil())
+		})
+
+		It("should return memory config when memory plugin is configured", func() {
+			decision := &Decision{
+				Name: "test_decision",
+				Plugins: []DecisionPlugin{
+					{
+						Type: "memory",
+						Configuration: map[string]interface{}{
+							"enabled":              true,
+							"retrieval_limit":      10,
+							"similarity_threshold": 0.75,
+							"auto_store":           true,
+						},
+					},
+				},
+			}
+
+			memConfig := decision.GetMemoryConfig()
+			Expect(memConfig).NotTo(BeNil())
+			Expect(memConfig.Enabled).To(BeTrue())
+			Expect(*memConfig.RetrievalLimit).To(Equal(10))
+			Expect(*memConfig.SimilarityThreshold).To(BeNumerically("~", 0.75, 0.001))
+			Expect(*memConfig.AutoStore).To(BeTrue())
+		})
+
+		It("should return memory config with partial settings", func() {
+			decision := &Decision{
+				Name: "test_decision",
+				Plugins: []DecisionPlugin{
+					{
+						Type: "memory",
+						Configuration: map[string]interface{}{
+							"enabled": false,
+							// Only enabled is set, other fields are nil
+						},
+					},
+				},
+			}
+
+			memConfig := decision.GetMemoryConfig()
+			Expect(memConfig).NotTo(BeNil())
+			Expect(memConfig.Enabled).To(BeFalse())
+			Expect(memConfig.RetrievalLimit).To(BeNil())
+			Expect(memConfig.SimilarityThreshold).To(BeNil())
+			Expect(memConfig.AutoStore).To(BeNil())
+		})
+	})
+
+	// -----------------------------------------------------------------
+	// Provider profiles
+	// -----------------------------------------------------------------
+	Describe("Provider Profiles", func() {
+		Context("YAML parsing", func() {
+			It("should parse provider_profiles and endpoint references", func() {
+				yamlData := `
+provider_profiles:
+  openai-prod:
+    type: "openai"
+    base_url: "https://api.openai.com/v1"
+  azure-east:
+    type: "azure-openai"
+    base_url: "https://myresource.openai.azure.com/openai/deployments/gpt-4o"
+    api_version: "2024-10-21"
+  anthropic-prod:
+    type: "anthropic"
+    base_url: "https://api.anthropic.com"
+    extra_headers:
+      anthropic-version: "2023-06-01"
+  bedrock-west:
+    type: "bedrock"
+    base_url: "https://bedrock-mantle.us-west-2.api.aws/v1"
+vllm_endpoints:
+  - name: "openai"
+    provider_profile: "openai-prod"
+  - name: "azure"
+    provider_profile: "azure-east"
+  - name: "local-vllm"
+    address: "127.0.0.1"
+    port: 8000
+model_config:
+  "gpt-4o":
+    preferred_endpoints: ["openai", "azure"]
+  "Qwen/Qwen2.5-14B":
+    preferred_endpoints: ["local-vllm"]
+`
+				var cfg RouterConfig
+				err := yaml.Unmarshal([]byte(yamlData), &cfg)
+				Expect(err).NotTo(HaveOccurred())
+
+				// provider_profiles parsed
+				Expect(cfg.ProviderProfiles).To(HaveLen(4))
+				Expect(cfg.ProviderProfiles["openai-prod"].Type).To(Equal("openai"))
+				Expect(cfg.ProviderProfiles["azure-east"].APIVersion).To(Equal("2024-10-21"))
+				Expect(cfg.ProviderProfiles["anthropic-prod"].ExtraHeaders).To(HaveKeyWithValue("anthropic-version", "2023-06-01"))
+
+				// endpoint references
+				Expect(cfg.VLLMEndpoints).To(HaveLen(3))
+				Expect(cfg.VLLMEndpoints[0].ProviderProfileName).To(Equal("openai-prod"))
+				Expect(cfg.VLLMEndpoints[2].ProviderProfileName).To(BeEmpty())
+			})
+		})
+
+		Context("ResolveAddress", func() {
+			It("should extract host:port from base_url", func() {
+				profiles := map[string]ProviderProfile{
+					"openai-prod": {Type: "openai", BaseURL: "https://api.openai.com/v1"},
+					"azure-east":  {Type: "azure-openai", BaseURL: "https://myresource.openai.azure.com/openai/deployments/gpt-4o"},
+				}
+
+				ep := VLLMEndpoint{Name: "openai", ProviderProfileName: "openai-prod"}
+				addr, err := ep.ResolveAddress(profiles)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(addr).To(Equal("api.openai.com:443"))
+
+				ep2 := VLLMEndpoint{Name: "azure", ProviderProfileName: "azure-east"}
+				addr2, err2 := ep2.ResolveAddress(profiles)
+				Expect(err2).NotTo(HaveOccurred())
+				Expect(addr2).To(Equal("myresource.openai.azure.com:443"))
+			})
+
+			It("should use address:port for legacy endpoints (no provider_profile)", func() {
+				ep := VLLMEndpoint{Name: "local", Address: "127.0.0.1", Port: 8000}
+				addr, err := ep.ResolveAddress(nil)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(addr).To(Equal("127.0.0.1:8000"))
+			})
+
+			It("should error when profile is set but has no base_url", func() {
+				profiles := map[string]ProviderProfile{
+					"minimal": {Type: "openai"},
+				}
+				ep := VLLMEndpoint{Name: "ep1", Address: "10.0.0.1", Port: 9000, ProviderProfileName: "minimal"}
+				_, err := ep.ResolveAddress(profiles)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("no base_url"))
+			})
+
+			It("should error when profile is set but does not exist", func() {
+				profiles := map[string]ProviderProfile{}
+				ep := VLLMEndpoint{Name: "ep1", ProviderProfileName: "missing"}
+				_, err := ep.ResolveAddress(profiles)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("does not exist"))
+			})
+
+			It("should error when profile is set but profiles map is nil", func() {
+				ep := VLLMEndpoint{Name: "ep1", ProviderProfileName: "some-profile"}
+				_, err := ep.ResolveAddress(nil)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("no provider_profiles map"))
+			})
+
+			It("should handle explicit port in base_url", func() {
+				profiles := map[string]ProviderProfile{
+					"custom": {Type: "openai", BaseURL: "http://localhost:8080/v1"},
+				}
+				ep := VLLMEndpoint{Name: "ep1", ProviderProfileName: "custom"}
+				addr, err := ep.ResolveAddress(profiles)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(addr).To(Equal("localhost:8080"))
+			})
+
+			It("should error on unsupported URL scheme", func() {
+				profiles := map[string]ProviderProfile{
+					"ftp": {Type: "openai", BaseURL: "ftp://files.example.com/v1"},
+				}
+				ep := VLLMEndpoint{Name: "ep1", ProviderProfileName: "ftp"}
+				_, err := ep.ResolveAddress(profiles)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("unsupported scheme"))
+			})
+		})
+
+		Context("ProviderType", func() {
+			It("should return correct provider type", func() {
+				for _, t := range []string{"openai", "anthropic", "azure-openai", "bedrock", "gemini", "vertex-ai"} {
+					pt, err := (&ProviderProfile{Type: t}).ProviderType()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(pt).To(Equal(t))
+				}
+			})
+
+			It("should error on unknown type", func() {
+				_, err := (&ProviderProfile{Type: "unknown"}).ProviderType()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("unknown provider profile type"))
+			})
+
+			It("should error on empty type", func() {
+				_, err := (&ProviderProfile{}).ProviderType()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("empty type"))
+			})
+
+			It("should error on nil profile", func() {
+				var nilProfile *ProviderProfile
+				_, err := nilProfile.ProviderType()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("nil"))
+			})
+		})
+
+		Context("ResolveAuthHeader", func() {
+			It("should return type-specific defaults", func() {
+				h, p, err := (&ProviderProfile{Type: "openai"}).ResolveAuthHeader()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h).To(Equal("Authorization"))
+				Expect(p).To(Equal("Bearer"))
+
+				h, p, err = (&ProviderProfile{Type: "anthropic"}).ResolveAuthHeader()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h).To(Equal("x-api-key"))
+				Expect(p).To(BeEmpty())
+
+				h, p, err = (&ProviderProfile{Type: "azure-openai"}).ResolveAuthHeader()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h).To(Equal("api-key"))
+				Expect(p).To(BeEmpty())
+
+				h, p, err = (&ProviderProfile{Type: "bedrock"}).ResolveAuthHeader()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h).To(Equal("Authorization"))
+				Expect(p).To(Equal("Bearer"))
+			})
+
+			It("should allow explicit overrides", func() {
+				profile := &ProviderProfile{
+					Type:       "openai",
+					AuthHeader: "X-Custom-Auth",
+					AuthPrefix: "Token",
+				}
+				h, p, err := profile.ResolveAuthHeader()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h).To(Equal("X-Custom-Auth"))
+				Expect(p).To(Equal("Token"))
+			})
+
+			It("should error on unknown type", func() {
+				_, _, err := (&ProviderProfile{Type: "bogus"}).ResolveAuthHeader()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("unknown provider type"))
+			})
+		})
+
+		Context("ResolveChatPath", func() {
+			It("should return type-specific default paths", func() {
+				path, err := (&ProviderProfile{Type: "openai", BaseURL: "https://api.openai.com/v1"}).ResolveChatPath()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(path).To(Equal("/v1/chat/completions"))
+
+				path, err = (&ProviderProfile{Type: "anthropic", BaseURL: "https://api.anthropic.com"}).ResolveChatPath()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(path).To(Equal("/v1/messages"))
+			})
+
+			It("should append api-version for azure-openai", func() {
+				profile := &ProviderProfile{
+					Type:       "azure-openai",
+					BaseURL:    "https://myresource.openai.azure.com/openai/deployments/gpt-4o",
+					APIVersion: "2024-10-21",
+				}
+				path, err := profile.ResolveChatPath()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(path).To(Equal("/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"))
+			})
+
+			It("should error for unrecognised type", func() {
+				_, err := (&ProviderProfile{Type: "vllm"}).ResolveChatPath()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("unknown provider type"))
+			})
+
+			It("should use explicit ChatPath override", func() {
+				profile := &ProviderProfile{Type: "openai", ChatPath: "/custom/path"}
+				path, err := profile.ResolveChatPath()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(path).To(Equal("/custom/path"))
+			})
+
+			It("should error for nil profile", func() {
+				var nilProfile *ProviderProfile
+				_, err := nilProfile.ResolveChatPath()
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("nil"))
+			})
+		})
+
+		Context("ExtraHeaders", func() {
+			It("should pass through explicit extra_headers only", func() {
+				profile := &ProviderProfile{
+					Type:         "anthropic",
+					ExtraHeaders: map[string]string{"anthropic-version": "2023-06-01", "custom": "value"},
+				}
+				Expect(profile.ExtraHeaders).To(HaveKeyWithValue("anthropic-version", "2023-06-01"))
+				Expect(profile.ExtraHeaders).To(HaveKeyWithValue("custom", "value"))
+			})
+
+			It("should be nil when not configured", func() {
+				profile := &ProviderProfile{Type: "openai"}
+				Expect(profile.ExtraHeaders).To(BeNil())
+			})
+		})
+
+		Context("GetProviderProfileForEndpoint", func() {
+			It("should resolve endpoint to profile", func() {
+				cfg := &RouterConfig{
+					BackendModels: BackendModels{
+						VLLMEndpoints: []VLLMEndpoint{
+							{Name: "openai", ProviderProfileName: "openai-prod"},
+							{Name: "local", Address: "127.0.0.1", Port: 8000},
+						},
+						ProviderProfiles: map[string]ProviderProfile{
+							"openai-prod": {Type: "openai", BaseURL: "https://api.openai.com/v1"},
+						},
+					},
+				}
+				profile, err := cfg.GetProviderProfileForEndpoint("openai")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(profile).NotTo(BeNil())
+				Expect(profile.Type).To(Equal("openai"))
+
+				// Endpoint without profile — valid, returns nil profile and no error
+				profile, err = cfg.GetProviderProfileForEndpoint("local")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(profile).To(BeNil())
+			})
+
+			It("should error on non-existent endpoint", func() {
+				cfg := &RouterConfig{
+					BackendModels: BackendModels{
+						VLLMEndpoints: []VLLMEndpoint{
+							{Name: "local", Address: "127.0.0.1", Port: 8000},
+						},
+					},
+				}
+				_, err := cfg.GetProviderProfileForEndpoint("nonexistent")
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("not found"))
+			})
+
+			It("should error on dangling profile reference", func() {
+				cfg := &RouterConfig{
+					BackendModels: BackendModels{
+						VLLMEndpoints: []VLLMEndpoint{
+							{Name: "openai", ProviderProfileName: "missing-profile"},
+						},
+						ProviderProfiles: map[string]ProviderProfile{
+							"other-profile": {Type: "openai"},
+						},
+					},
+				}
+				_, err := cfg.GetProviderProfileForEndpoint("openai")
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("does not exist"))
+				Expect(err.Error()).To(ContainSubstring("missing-profile"))
+			})
+		})
+
+		Context("SelectBestEndpointWithDetailsForModel with profiles", func() {
+			It("should use base_url for address resolution", func() {
+				cfg := &RouterConfig{
+					BackendModels: BackendModels{
+						ModelConfig: map[string]ModelParams{
+							"gpt-4o": {PreferredEndpoints: []string{"openai"}},
+						},
+						VLLMEndpoints: []VLLMEndpoint{
+							{Name: "openai", ProviderProfileName: "openai-prod"},
+						},
+						ProviderProfiles: map[string]ProviderProfile{
+							"openai-prod": {Type: "openai", BaseURL: "https://api.openai.com/v1"},
+						},
+					},
+				}
+
+				addr, name, found, detailErr := cfg.SelectBestEndpointWithDetailsForModel("gpt-4o")
+				Expect(detailErr).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(name).To(Equal("openai"))
+				Expect(addr).To(Equal("api.openai.com:443"))
+			})
+		})
+	})
+
+	// -----------------------------------------------------------------------
+	// PromptCompressionConfig
+	// -----------------------------------------------------------------------
+	Describe("PromptCompressionConfig", func() {
+		Context("SkipSignalsSet", func() {
+			It("should default to jailbreak and pii when SkipSignals is empty", func() {
+				pc := PromptCompressionConfig{Enabled: true, MaxTokens: 512}
+				s := pc.SkipSignalsSet()
+				Expect(s).To(HaveKey("jailbreak"))
+				Expect(s).To(HaveKey("pii"))
+				Expect(s).To(HaveLen(2))
+			})
+
+			It("should use configured SkipSignals when provided", func() {
+				pc := PromptCompressionConfig{
+					Enabled:     true,
+					MaxTokens:   512,
+					SkipSignals: []string{"jailbreak"},
+				}
+				s := pc.SkipSignalsSet()
+				Expect(s).To(HaveKey("jailbreak"))
+				Expect(s).NotTo(HaveKey("pii"))
+				Expect(s).To(HaveLen(1))
+			})
+
+			It("should support adding custom signal types to skip list", func() {
+				pc := PromptCompressionConfig{
+					Enabled:     true,
+					MaxTokens:   512,
+					SkipSignals: []string{"jailbreak", "pii", "fact_check"},
+				}
+				s := pc.SkipSignalsSet()
+				Expect(s).To(HaveKey("jailbreak"))
+				Expect(s).To(HaveKey("pii"))
+				Expect(s).To(HaveKey("fact_check"))
+				Expect(s).To(HaveLen(3))
+			})
+		})
+
+		Context("MinLength", func() {
+			It("should be zero by default", func() {
+				pc := PromptCompressionConfig{Enabled: true, MaxTokens: 512}
+				Expect(pc.MinLength).To(Equal(0))
+			})
+
+			It("should parse from YAML", func() {
+				yamlStr := `
+enabled: true
+max_tokens: 512
+min_length: 2000
+skip_signals:
+  - jailbreak
+  - pii
+`
+				var pc PromptCompressionConfig
+				err := yaml.Unmarshal([]byte(yamlStr), &pc)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pc.Enabled).To(BeTrue())
+				Expect(pc.MaxTokens).To(Equal(512))
+				Expect(pc.MinLength).To(Equal(2000))
+				Expect(pc.SkipSignals).To(Equal([]string{"jailbreak", "pii"}))
+			})
+
+			It("should parse custom skip signals from YAML", func() {
+				yamlStr := `
+enabled: true
+max_tokens: 256
+min_length: 1000
+skip_signals:
+  - jailbreak
+`
+				var pc PromptCompressionConfig
+				err := yaml.Unmarshal([]byte(yamlStr), &pc)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pc.MinLength).To(Equal(1000))
+				Expect(pc.SkipSignals).To(Equal([]string{"jailbreak"}))
+				s := pc.SkipSignalsSet()
+				Expect(s).To(HaveKey("jailbreak"))
+				Expect(s).NotTo(HaveKey("pii"))
+			})
+		})
+	})
+})

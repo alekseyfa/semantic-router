@@ -4,8 +4,22 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/vllm.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="vLLM Semantic Router Dashboard - Monitoring, Configuration, and Playground" />
-    <title>vLLM Semantic Router Dashboard</title>
+    <meta name="description" content="vLLM Semantic Router - Manage your AI-powered Intelligent Router" />
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Theme color for mobile browsers -->
+    <meta name="theme-color" content="#76b900" />
+
+    <!-- Apple Touch Icon -->
+    <link rel="apple-touch-icon" href="/vllm-mobile.png" />
+
+    <title>vLLM Semantic Router</title>
+
+    <!-- Preload WASM compiler for faster init -->
+    <link rel="preload" href="/wasm_exec.js" as="script" />
+    <link rel="preload" href="/signal-compiler.wasm" as="fetch" type="application/wasm" crossorigin />
   </head>
   <body>
     <div id="root"></div>

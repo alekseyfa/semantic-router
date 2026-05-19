@@ -349,7 +349,7 @@ fn test_gemma_config_validates_mqa(gemma_config: GemmaEmbeddingConfig) {
 #[rstest]
 #[serial]
 fn test_load_gemma_config_valid() {
-    let config = GemmaEmbeddingConfig::from_pretrained("../models/embeddinggemma-300m").unwrap();
+    let config = GemmaEmbeddingConfig::from_pretrained("../models/mom-embedding-flash").unwrap();
 
     // Validate critical parameters
     assert_eq!(config.vocab_size, 262144, "vocab_size should be 262144");
@@ -416,7 +416,7 @@ fn test_gemma3_model_load(gemma3_model_only: Arc<Gemma3Model>) {
     println!("Gemma3Model Load Test (using cached fixture)");
     println!("{}\n", "=".repeat(80));
 
-    println!("  ✅ Gemma3Model loaded successfully via fixture");
+    println!("  Gemma3Model loaded successfully via fixture");
     println!(
         "  Model config: {} layers, {} attention heads",
         gemma3_model_only.config().num_hidden_layers,
@@ -470,5 +470,5 @@ fn test_gemma3_model_forward(gemma3_model_only: Arc<Gemma3Model>) {
         seq_len
     );
 
-    println!("  ✅ Forward pass test passed");
+    println!("  Forward pass test passed");
 }

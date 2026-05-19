@@ -9,17 +9,7 @@ import (
 
 	"github.com/vllm-project/semantic-router/e2e/pkg/banner"
 	"github.com/vllm-project/semantic-router/e2e/pkg/framework"
-	aigateway "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
-	aibrix "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
-	dynamicconfig "github.com/vllm-project/semantic-router/e2e/profiles/dynamic-config"
-	llmd "github.com/vllm-project/semantic-router/e2e/profiles/llm-d"
-	routingstrategies "github.com/vllm-project/semantic-router/e2e/profiles/routing-strategies"
-
-	// Import profiles to register test cases
-	_ "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
-	_ "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
-	_ "github.com/vllm-project/semantic-router/e2e/profiles/llm-d"
-	_ "github.com/vllm-project/semantic-router/e2e/profiles/routing-strategies"
+	_ "github.com/vllm-project/semantic-router/e2e/profiles/all"
 )
 
 const version = "v1.0.0"
@@ -27,7 +17,7 @@ const version = "v1.0.0"
 func main() {
 	// Parse command line flags
 	var (
-		profile            = flag.String("profile", "ai-gateway", "Test profile to run (ai-gateway, istio, etc.)")
+		profile            = flag.String("profile", "ai-gateway", fmt.Sprintf("Test profile to run (%s)", strings.Join(framework.RegisteredProfileNames(), ", ")))
 		clusterName        = flag.String("cluster", "semantic-router-e2e", "Kind cluster name")
 		imageTag           = flag.String("image-tag", "e2e-test", "Docker image tag")
 		keepCluster        = flag.Bool("keep-cluster", false, "Keep cluster after tests complete")
@@ -83,7 +73,7 @@ func main() {
 	}
 
 	// Get the profile implementation
-	profileImpl, err := getProfile(*profile)
+	profileImpl, err := framework.NewProfileByName(*profile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -96,26 +86,6 @@ func main() {
 	if err := runner.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-}
-
-func getProfile(name string) (framework.Profile, error) {
-	switch name {
-	case "ai-gateway":
-		return aigateway.NewProfile(), nil
-	case "dynamic-config":
-		return dynamicconfig.NewProfile(), nil
-	case "aibrix":
-		return aibrix.NewProfile(), nil
-	case "llm-d":
-		return llmd.NewProfile(), nil
-	case "routing-strategies":
-		return routingstrategies.NewProfile(), nil
-	// Add more profiles here as they are implemented
-	// case "istio":
-	//     return istio.NewProfile(), nil
-	default:
-		return nil, fmt.Errorf("unknown profile: %s", name)
 	}
 }
 

@@ -6,11 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 // ToolsDBHandler reads and serves the tools_db.json file
-func ToolsDBHandler(configDir string) http.HandlerFunc {
+func ToolsDBHandler(toolsDBPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Only allow GET requests
 		if r.Method != http.MethodGet {
@@ -18,14 +17,16 @@ func ToolsDBHandler(configDir string) http.HandlerFunc {
 			return
 		}
 
-		// Construct the tools_db.json path
-		toolsDBPath := filepath.Join(configDir, "tools_db.json")
-
 		// Read the tools database file
 		data, err := os.ReadFile(toolsDBPath)
 		if err != nil {
 			log.Printf("Error reading tools_db.json: %v", err)
-			http.Error(w, fmt.Sprintf("Failed to read tools database: %v", err), http.StatusInternalServerError)
+			// Return 404 if file doesn't exist, 500 for other errors
+			if os.IsNotExist(err) {
+				http.Error(w, fmt.Sprintf("Tools database not found: %v", err), http.StatusNotFound)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to read tools database: %v", err), http.StatusInternalServerError)
+			}
 			return
 		}
 

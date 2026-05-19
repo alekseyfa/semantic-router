@@ -3,12 +3,14 @@ package services
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/decision"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
@@ -59,12 +61,18 @@ func NewClassificationServiceWithAutoDiscovery(config *config.RouterConfig) (*Cl
 	modelsPath := "./models"
 	if config != nil && config.CategoryModel.ModelID != "" {
 		// Extract the models directory from the model path
-		// e.g., "models/category_classifier_modernbert-base_model" -> "models"
+		// e.g., "models/mom-domain-classifier" -> "models"
 		if idx := strings.Index(config.CategoryModel.ModelID, "/"); idx > 0 {
 			modelsPath = config.CategoryModel.ModelID[:idx]
 		}
 	}
-	unifiedClassifier, ucErr := classification.AutoInitializeUnifiedClassifier(modelsPath)
+
+	// Pass mom_registry to auto-discovery for LoRA detection
+	var modelRegistry map[string]string
+	if config != nil {
+		modelRegistry = config.MoMRegistry
+	}
+	unifiedClassifier, ucErr := classification.AutoInitializeUnifiedClassifierWithRegistry(modelsPath, modelRegistry)
 	if ucErr != nil {
 		logging.Infof("Unified classifier auto-discovery failed: %v", ucErr)
 	}
@@ -161,6 +169,47 @@ type IntentOptions struct {
 	ReturnProbabilities bool    `json:"return_probabilities,omitempty"`
 	ConfidenceThreshold float64 `json:"confidence_threshold,omitempty"`
 	IncludeExplanation  bool    `json:"include_explanation,omitempty"`
+	EvaluateAllSignals  bool    `json:"evaluate_all_signals,omitempty"` // Force evaluate all configured signals (for eval scenarios)
+}
+
+// MatchedSignals represents all matched signals from signal evaluation
+type MatchedSignals struct {
+	Keywords     []string `json:"keywords,omitempty"`
+	Embeddings   []string `json:"embeddings,omitempty"`
+	Domains      []string `json:"domains,omitempty"`
+	FactCheck    []string `json:"fact_check,omitempty"`
+	UserFeedback []string `json:"user_feedback,omitempty"`
+	Preferences  []string `json:"preferences,omitempty"`
+	Language     []string `json:"language,omitempty"`
+	Context      []string `json:"context,omitempty"`
+	Complexity   []string `json:"complexity,omitempty"`
+	Jailbreak    []string `json:"jailbreak,omitempty"`
+	PII          []string `json:"pii,omitempty"`
+}
+
+// DecisionResult represents the result of decision evaluation
+type DecisionResult struct {
+	DecisionName string   `json:"decision_name"`
+	Confidence   float64  `json:"confidence"`
+	MatchedRules []string `json:"matched_rules"`
+}
+
+// EvalDecisionResult represents the decision result for eval scenarios (without confidence)
+type EvalDecisionResult struct {
+	DecisionName     string          `json:"decision_name"`
+	UsedSignals      *MatchedSignals `json:"used_signals"`      // Signals used by this decision (from decision rules)
+	MatchedSignals   *MatchedSignals `json:"matched_signals"`   // Signals that matched
+	UnmatchedSignals *MatchedSignals `json:"unmatched_signals"` // Signals that didn't match
+}
+
+// EvalResponse represents the response from eval classification
+// This is specifically designed for evaluation scenarios with comprehensive signal information
+type EvalResponse struct {
+	OriginalText      string                                  `json:"original_text"` // The original query text
+	DecisionResult    *EvalDecisionResult                     `json:"decision_result,omitempty"`
+	RecommendedModels []string                                `json:"recommended_models,omitempty"` // All models from matched decision's modelRefs
+	RoutingDecision   string                                  `json:"routing_decision,omitempty"`
+	Metrics           *classification.SignalMetricsCollection `json:"metrics"` // Performance and confidence for each signal
 }
 
 // IntentResponse represents the response from intent classification
@@ -169,6 +218,10 @@ type IntentResponse struct {
 	Probabilities    map[string]float64 `json:"probabilities,omitempty"`
 	RecommendedModel string             `json:"recommended_model,omitempty"`
 	RoutingDecision  string             `json:"routing_decision,omitempty"`
+
+	// Signal-driven fields
+	MatchedSignals *MatchedSignals `json:"matched_signals,omitempty"`
+	DecisionResult *DecisionResult `json:"decision_result,omitempty"`
 }
 
 // Classification represents basic classification result
@@ -178,7 +231,79 @@ type Classification struct {
 	ProcessingTimeMs int64   `json:"processing_time_ms"`
 }
 
-// ClassifyIntent performs intent classification
+// buildIntentResponseFromSignals builds an IntentResponse from signals and decision result
+func (s *ClassificationService) buildIntentResponseFromSignals(
+	signals *classification.SignalResults,
+	decisionResult *decision.DecisionResult,
+	category string,
+	confidence float64,
+	processingTime int64,
+	req IntentRequest,
+) *IntentResponse {
+	response := &IntentResponse{
+		Classification: Classification{
+			Category:         category,
+			Confidence:       confidence,
+			ProcessingTimeMs: processingTime,
+		},
+	}
+
+	// Add probabilities if requested
+	if req.Options != nil && req.Options.ReturnProbabilities {
+		response.Probabilities = map[string]float64{
+			category: confidence,
+		}
+	}
+
+	// Add recommended model based on category or decision
+	if decisionResult != nil && decisionResult.Decision != nil && len(decisionResult.Decision.ModelRefs) > 0 {
+		modelRef := decisionResult.Decision.ModelRefs[0]
+		if modelRef.LoRAName != "" {
+			response.RecommendedModel = modelRef.LoRAName
+		} else {
+			response.RecommendedModel = modelRef.Model
+		}
+	} else if model := s.getRecommendedModel(category, confidence); model != "" {
+		response.RecommendedModel = model
+	}
+
+	// Determine routing decision
+	if decisionResult != nil && decisionResult.Decision != nil {
+		response.RoutingDecision = decisionResult.Decision.Name
+	} else {
+		response.RoutingDecision = s.getRoutingDecision(confidence, req.Options)
+	}
+
+	// Add signal information
+	if signals != nil {
+		response.MatchedSignals = &MatchedSignals{
+			Keywords:     signals.MatchedKeywordRules,
+			Embeddings:   signals.MatchedEmbeddingRules,
+			Domains:      signals.MatchedDomainRules,
+			FactCheck:    signals.MatchedFactCheckRules,
+			UserFeedback: signals.MatchedUserFeedbackRules,
+			Preferences:  signals.MatchedPreferenceRules,
+			Language:     signals.MatchedLanguageRules,
+			Context:      signals.MatchedContextRules,
+			Complexity:   signals.MatchedComplexityRules,
+			Jailbreak:    signals.MatchedJailbreakRules,
+			PII:          signals.MatchedPIIRules,
+		}
+	}
+
+	// Add decision result
+	if decisionResult != nil && decisionResult.Decision != nil {
+		response.DecisionResult = &DecisionResult{
+			DecisionName: decisionResult.Decision.Name,
+			Confidence:   decisionResult.Confidence,
+			MatchedRules: decisionResult.MatchedRules,
+		}
+	}
+
+	return response
+}
+
+// ClassifyIntent performs intent classification using signal-driven architecture
 func (s *ClassificationService) ClassifyIntent(req IntentRequest) (*IntentResponse, error) {
 	start := time.Now()
 
@@ -201,38 +326,50 @@ func (s *ClassificationService) ClassifyIntent(req IntentRequest) (*IntentRespon
 		}, nil
 	}
 
-	// Perform classification using the existing classifier
-	category, confidence, _, err := s.classifier.ClassifyCategoryWithEntropy(req.Text)
-	if err != nil {
-		return nil, fmt.Errorf("classification failed: %w", err)
+	// Use signal-driven architecture: evaluate all signals first
+	// Check if we should force evaluate all signals (for eval scenarios)
+	forceEvaluateAll := req.Options != nil && req.Options.EvaluateAllSignals
+	signals := s.classifier.EvaluateAllSignalsWithForceOption(req.Text, forceEvaluateAll)
+
+	// Evaluate decision with engine (if decisions are configured)
+	// Pass pre-computed signals to avoid re-evaluation
+	var decisionResult *decision.DecisionResult
+	var err error
+	if s.config != nil && len(s.config.IntelligentRouting.Decisions) > 0 {
+		decisionResult, err = s.classifier.EvaluateDecisionWithEngine(signals)
+		if err != nil {
+			// Log error but continue with classification
+			// Note: "no decisions configured" error is expected when decisions list is empty
+			if !strings.Contains(err.Error(), "no decisions configured") {
+				logging.Warnf("Decision evaluation failed, continuing with classification: %v", err)
+			}
+		}
+	}
+
+	// Get category classification (for backward compatibility and when no decision matches)
+	var category string
+	var confidence float64
+	if decisionResult != nil && decisionResult.Decision != nil {
+		// Use decision name as category
+		category = decisionResult.Decision.Name
+		confidence = decisionResult.Confidence
+	} else {
+		// Fallback to traditional classification
+		category, confidence, _, err = s.classifier.ClassifyCategoryWithEntropy(req.Text)
+		if err != nil {
+			// Graceful fallback when classification fails
+			// When domain signal was skipped due to low confidence and no decision matches,
+			// fall back to "other" category instead of returning an error
+			logging.Warnf("Classification fallback failed: %v, using default 'other' category", err)
+			category = "other"
+			confidence = 0.0
+		}
 	}
 
 	processingTime := time.Since(start).Milliseconds()
 
-	// Build response
-	response := &IntentResponse{
-		Classification: Classification{
-			Category:         category,
-			Confidence:       confidence,
-			ProcessingTimeMs: processingTime,
-		},
-	}
-
-	// Add probabilities if requested
-	if req.Options != nil && req.Options.ReturnProbabilities {
-		// TODO: Implement probability extraction from classifier
-		response.Probabilities = map[string]float64{
-			category: confidence,
-		}
-	}
-
-	// Add recommended model based on category
-	if model := s.getRecommendedModel(category, confidence); model != "" {
-		response.RecommendedModel = model
-	}
-
-	// Determine routing decision
-	response.RoutingDecision = s.getRoutingDecision(confidence, req.Options)
+	// Build response from signals and decision
+	response := s.buildIntentResponseFromSignals(signals, decisionResult, category, confidence, processingTime, req)
 
 	return response, nil
 }
@@ -249,6 +386,7 @@ type PIIOptions struct {
 	ConfidenceThreshold float64  `json:"confidence_threshold,omitempty"`
 	ReturnPositions     bool     `json:"return_positions,omitempty"`
 	MaskEntities        bool     `json:"mask_entities,omitempty"`
+	RevealEntityText    bool     `json:"reveal_entity_text,omitempty"`
 }
 
 // PIIResponse represents the response from PII detection
@@ -291,40 +429,115 @@ func (s *ClassificationService) DetectPII(req PIIRequest) (*PIIResponse, error) 
 	}
 
 	// Perform PII detection using the classifier with full details
-	detections, err := s.classifier.ClassifyPIIWithDetails(req.Text)
+	// Use custom confidence threshold if provided
+	var detections []classification.PIIDetection
+	var err error
+	if req.Options != nil && req.Options.ConfidenceThreshold > 0 {
+		detections, err = s.classifier.ClassifyPIIWithDetailsAndThreshold(req.Text, float32(req.Options.ConfidenceThreshold))
+	} else {
+		detections, err = s.classifier.ClassifyPIIWithDetails(req.Text)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("PII detection failed: %w", err)
 	}
-
 	processingTime := time.Since(start).Milliseconds()
+	response := s.buildPIIResponse(req.Text, detections, req.Options)
+	response.ProcessingTimeMs = processingTime
+	return response, nil
+}
 
-	// Build response
-	response := &PIIResponse{
-		HasPII:           len(detections) > 0,
-		Entities:         []PIIEntity{},
-		ProcessingTimeMs: processingTime,
+// buildPIIResponse processes raw PII detections into a PIIResponse, applying all options.
+func (s *ClassificationService) buildPIIResponse(text string, detections []classification.PIIDetection, options *PIIOptions) *PIIResponse {
+	// Filter by entity types if specified
+	if options != nil && len(options.EntityTypes) > 0 {
+		filtered := detections[:0]
+		for _, d := range detections {
+			for _, t := range options.EntityTypes {
+				if strings.EqualFold(d.EntityType, t) {
+					filtered = append(filtered, d)
+					break
+				}
+			}
+		}
+		detections = filtered
 	}
 
-	// Convert PII detections to API entities with actual confidence scores
+	returnPositions := options != nil && options.ReturnPositions
+	maskEntities := options != nil && options.MaskEntities
+	revealEntityText := options != nil && options.RevealEntityText
+
+	// Build placeholder mapping for masking: (EntityType, Text) -> placeholder
+	var placeholders map[string]string
+	if maskEntities {
+		typeCounters := make(map[string]map[string]int)
+		placeholders = make(map[string]string)
+		for _, detection := range detections {
+			key := detection.EntityType + "\x00" + detection.Text
+			if _, exists := placeholders[key]; exists {
+				continue
+			}
+			texts, ok := typeCounters[detection.EntityType]
+			if !ok {
+				texts = make(map[string]int)
+				typeCounters[detection.EntityType] = texts
+			}
+			idx := len(texts)
+			texts[detection.Text] = idx
+			placeholders[key] = fmt.Sprintf("[%s_%d]", detection.EntityType, idx)
+		}
+	}
+
+	response := &PIIResponse{
+		HasPII:   len(detections) > 0,
+		Entities: []PIIEntity{},
+	}
+
 	for _, detection := range detections {
+		value := "[DETECTED]"
+		if revealEntityText {
+			value = detection.Text
+		}
 		entity := PIIEntity{
 			Type:       detection.EntityType,
-			Value:      "[DETECTED]",                  // Redacted for security
-			Confidence: float64(detection.Confidence), // Actual confidence from model
-			StartPos:   detection.Start,
-			EndPos:     detection.End,
+			Value:      value,
+			Confidence: float64(detection.Confidence),
+		}
+		if returnPositions {
+			entity.StartPos = detection.Start
+			entity.EndPos = detection.End
+		}
+		if maskEntities {
+			key := detection.EntityType + "\x00" + detection.Text
+			entity.MaskedValue = placeholders[key]
 		}
 		response.Entities = append(response.Entities, entity)
 	}
 
-	// Set security recommendation
+	// Build masked text by replacing entity spans in reverse order
+	if maskEntities && len(detections) > 0 {
+		sorted := make([]classification.PIIDetection, len(detections))
+		copy(sorted, detections)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].Start > sorted[j].Start
+		})
+		maskedText := text
+		for _, detection := range sorted {
+			key := detection.EntityType + "\x00" + detection.Text
+			placeholder := placeholders[key]
+			if detection.Start >= 0 && detection.End <= len(maskedText) && detection.Start < detection.End {
+				maskedText = maskedText[:detection.Start] + placeholder + maskedText[detection.End:]
+			}
+		}
+		response.MaskedText = maskedText
+	}
+
 	if response.HasPII {
 		response.SecurityRecommendation = "block"
 	} else {
 		response.SecurityRecommendation = "allow"
 	}
 
-	return response, nil
+	return response
 }
 
 // SecurityRequest represents a request for security detection
@@ -409,8 +622,40 @@ func (s *ClassificationService) CheckSecurity(req SecurityRequest) (*SecurityRes
 
 // Helper methods
 func (s *ClassificationService) getRecommendedModel(category string, _ float64) string {
-	// TODO: Implement model recommendation logic based on category
-	return fmt.Sprintf("%s-specialized-model", category)
+	// Use classifier's existing logic if available
+	if s.classifier != nil {
+		model := s.classifier.SelectBestModelForCategory(category)
+		if model != "" {
+			return model
+		}
+	}
+
+	// Fallback: Access config directly to find decision and model
+	if s.config != nil {
+		// Find decision by category name (case-insensitive)
+		for _, decision := range s.config.IntelligentRouting.Decisions {
+			if strings.EqualFold(decision.Name, category) {
+				// Get first model from ModelRefs
+				if len(decision.ModelRefs) > 0 {
+					modelRef := decision.ModelRefs[0]
+					// Use LoRA name if specified, otherwise base model
+					if modelRef.LoRAName != "" {
+						return modelRef.LoRAName
+					}
+					return modelRef.Model
+				}
+				break
+			}
+		}
+
+		// Fallback to default model if no decision found
+		if s.config.BackendModels.DefaultModel != "" {
+			return s.config.BackendModels.DefaultModel
+		}
+	}
+
+	// Return empty string if no recommendation available
+	return ""
 }
 
 func (s *ClassificationService) getRoutingDecision(confidence float64, options *IntentOptions) string {
@@ -470,45 +715,8 @@ func (s *ClassificationService) ClassifyBatchUnifiedWithOptions(texts []string, 
 	return response, nil
 }
 
-// ClassifyIntent with unified classifier support (backward compatibility)
-func (s *ClassificationService) ClassifyIntentUnified(req IntentRequest) (*IntentResponse, error) {
-	if s.unifiedClassifier != nil {
-		// Use unified classifier for better performance
-		results, err := s.ClassifyBatchUnified([]string{req.Text})
-		if err != nil {
-			return nil, err
-		}
-
-		if len(results.IntentResults) == 0 {
-			return nil, fmt.Errorf("no classification results")
-		}
-
-		// Convert unified result to legacy format
-		intentResult := results.IntentResults[0]
-
-		// Build probabilities map if available
-		var probabilities map[string]float64
-		if len(intentResult.Probabilities) > 0 && req.Options != nil && req.Options.ReturnProbabilities {
-			probabilities = make(map[string]float64)
-			// For now, just include the main category probability
-			probabilities[intentResult.Category] = float64(intentResult.Confidence)
-		}
-
-		return &IntentResponse{
-			Classification: Classification{
-				Category:         intentResult.Category,
-				Confidence:       float64(intentResult.Confidence),
-				ProcessingTimeMs: results.ProcessingTimeMs,
-			},
-			Probabilities:    probabilities,
-			RecommendedModel: s.getRecommendedModel(intentResult.Category, float64(intentResult.Confidence)),
-			RoutingDecision:  s.getRoutingDecision(float64(intentResult.Confidence), req.Options),
-		}, nil
-	}
-
-	// Fallback to legacy classifier
-	return s.ClassifyIntent(req)
-}
+// NOTE: ClassifyIntentUnified removed - ClassifyIntent now always uses signal-driven architecture
+// For batch operations, use ClassifyBatchUnifiedWithOptions()
 
 // ClassifyPIIUnified performs PII detection using unified classifier
 func (s *ClassificationService) ClassifyPIIUnified(texts []string) ([]classification.PIIResult, error) {
@@ -556,6 +764,141 @@ func (s *ClassificationService) GetUnifiedClassifierStats() map[string]interface
 	return stats
 }
 
+// GetClassifier returns the classifier instance (for signal-driven methods)
+func (s *ClassificationService) GetClassifier() *classification.Classifier {
+	return s.classifier
+}
+
+// FactCheckRequest represents a request for fact-check classification
+type FactCheckRequest struct {
+	Text    string            `json:"text"`
+	Options *FactCheckOptions `json:"options,omitempty"`
+}
+
+// FactCheckOptions contains options for fact-check classification
+type FactCheckOptions struct {
+	ConfidenceThreshold float64 `json:"confidence_threshold,omitempty"`
+}
+
+// FactCheckResponse represents the response from fact-check classification
+type FactCheckResponse struct {
+	NeedsFactCheck   bool    `json:"needs_fact_check"`
+	Label            string  `json:"label"`
+	Confidence       float64 `json:"confidence"`
+	ProcessingTimeMs int64   `json:"processing_time_ms"`
+}
+
+// ClassifyFactCheck performs fact-check classification
+func (s *ClassificationService) ClassifyFactCheck(req FactCheckRequest) (*FactCheckResponse, error) {
+	start := time.Now()
+
+	if req.Text == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Check if classifier is available
+	if s.classifier == nil {
+		processingTime := time.Since(start).Milliseconds()
+		return &FactCheckResponse{
+			NeedsFactCheck:   false,
+			Label:            "unknown",
+			Confidence:       0.0,
+			ProcessingTimeMs: processingTime,
+		}, nil
+	}
+
+	// Check if fact-check classifier is enabled
+	if !s.classifier.IsFactCheckEnabled() {
+		processingTime := time.Since(start).Milliseconds()
+		return &FactCheckResponse{
+			NeedsFactCheck:   false,
+			Label:            "fact_check_disabled",
+			Confidence:       0.0,
+			ProcessingTimeMs: processingTime,
+		}, nil
+	}
+
+	// Perform fact-check classification
+	result, err := s.classifier.ClassifyFactCheck(req.Text)
+	if err != nil {
+		return nil, fmt.Errorf("fact-check classification failed: %w", err)
+	}
+
+	processingTime := time.Since(start).Milliseconds()
+
+	return &FactCheckResponse{
+		NeedsFactCheck:   result.NeedsFactCheck,
+		Label:            result.Label,
+		Confidence:       float64(result.Confidence),
+		ProcessingTimeMs: processingTime,
+	}, nil
+}
+
+// UserFeedbackRequest represents a request for user feedback classification
+type UserFeedbackRequest struct {
+	Text    string               `json:"text"`
+	Options *UserFeedbackOptions `json:"options,omitempty"`
+}
+
+// UserFeedbackOptions contains options for user feedback classification
+type UserFeedbackOptions struct {
+	ConfidenceThreshold float64 `json:"confidence_threshold,omitempty"`
+}
+
+// UserFeedbackResponse represents the response from user feedback classification
+type UserFeedbackResponse struct {
+	FeedbackType     string  `json:"feedback_type"`
+	Label            string  `json:"label"`
+	Confidence       float64 `json:"confidence"`
+	ProcessingTimeMs int64   `json:"processing_time_ms"`
+}
+
+// ClassifyUserFeedback performs user feedback classification
+func (s *ClassificationService) ClassifyUserFeedback(req UserFeedbackRequest) (*UserFeedbackResponse, error) {
+	start := time.Now()
+
+	if req.Text == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Check if classifier is available
+	if s.classifier == nil {
+		processingTime := time.Since(start).Milliseconds()
+		return &UserFeedbackResponse{
+			FeedbackType:     "unknown",
+			Label:            "unknown",
+			Confidence:       0.0,
+			ProcessingTimeMs: processingTime,
+		}, nil
+	}
+
+	// Check if feedback detector is enabled
+	if !s.classifier.IsFeedbackDetectorEnabled() {
+		processingTime := time.Since(start).Milliseconds()
+		return &UserFeedbackResponse{
+			FeedbackType:     "feedback_detector_disabled",
+			Label:            "feedback_detector_disabled",
+			Confidence:       0.0,
+			ProcessingTimeMs: processingTime,
+		}, nil
+	}
+
+	// Perform user feedback classification
+	result, err := s.classifier.ClassifyFeedback(req.Text)
+	if err != nil {
+		return nil, fmt.Errorf("user feedback classification failed: %w", err)
+	}
+
+	processingTime := time.Since(start).Milliseconds()
+
+	return &UserFeedbackResponse{
+		FeedbackType:     result.FeedbackType,
+		Label:            result.FeedbackType, // FeedbackType is the label
+		Confidence:       float64(result.Confidence),
+		ProcessingTimeMs: processingTime,
+	}, nil
+}
+
 // GetConfig returns the current configuration
 func (s *ClassificationService) GetConfig() *config.RouterConfig {
 	s.configMutex.RLock()
@@ -570,4 +913,281 @@ func (s *ClassificationService) UpdateConfig(newConfig *config.RouterConfig) {
 	s.config = newConfig
 	// Update the global config as well
 	config.Replace(newConfig)
+}
+
+// ClassifyIntentForEval performs intent classification specifically for evaluation scenarios
+// This method forces evaluation of all signals and returns comprehensive signal information
+func (s *ClassificationService) ClassifyIntentForEval(req IntentRequest) (*EvalResponse, error) {
+	if req.Text == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Check if classifier is available
+	if s.classifier == nil {
+		// Return placeholder response
+		return &EvalResponse{
+			OriginalText: req.Text,
+			Metrics:      &classification.SignalMetricsCollection{},
+		}, nil
+	}
+
+	// Force evaluate all signals
+	signals := s.classifier.EvaluateAllSignalsWithForceOption(req.Text, true)
+
+	// Evaluate decision with engine (if decisions are configured)
+	var decisionResult *decision.DecisionResult
+	var err error
+	if s.config != nil && len(s.config.IntelligentRouting.Decisions) > 0 {
+		decisionResult, err = s.classifier.EvaluateDecisionWithEngine(signals)
+		if err != nil {
+			// Log error but continue
+			if !strings.Contains(err.Error(), "no decisions configured") {
+				logging.Warnf("Decision evaluation failed: %v", err)
+			}
+		}
+	}
+
+	// Build eval response
+	response := s.buildEvalResponse(req.Text, signals, decisionResult)
+
+	return response, nil
+}
+
+// buildEvalResponse builds an EvalResponse from signal results and decision result
+func (s *ClassificationService) buildEvalResponse(
+	text string,
+	signals *classification.SignalResults,
+	decisionResult *decision.DecisionResult,
+) *EvalResponse {
+	response := &EvalResponse{
+		OriginalText: text,
+		Metrics:      signals.Metrics,
+	}
+
+	// Build matched signals
+	matchedSignals := &MatchedSignals{
+		Keywords:     signals.MatchedKeywordRules,
+		Embeddings:   signals.MatchedEmbeddingRules,
+		Domains:      signals.MatchedDomainRules,
+		FactCheck:    signals.MatchedFactCheckRules,
+		UserFeedback: signals.MatchedUserFeedbackRules,
+		Preferences:  signals.MatchedPreferenceRules,
+		Language:     signals.MatchedLanguageRules,
+		Context:      signals.MatchedContextRules,
+		Complexity:   signals.MatchedComplexityRules,
+		Jailbreak:    signals.MatchedJailbreakRules,
+		PII:          signals.MatchedPIIRules,
+	}
+
+	// Build unmatched signals by comparing all configured signals with matched signals
+	unmatchedSignals := s.getUnmatchedSignals(signals)
+
+	// Build decision result
+	if decisionResult != nil && decisionResult.Decision != nil {
+		// Extract used signals from decision's rule configuration (not just matched rules)
+		usedSignals := s.extractUsedSignalsFromDecision(decisionResult.Decision)
+
+		response.DecisionResult = &EvalDecisionResult{
+			DecisionName:     decisionResult.Decision.Name,
+			UsedSignals:      usedSignals,
+			MatchedSignals:   matchedSignals,
+			UnmatchedSignals: unmatchedSignals,
+		}
+
+		// Set recommended models and routing decision
+		if len(decisionResult.Decision.ModelRefs) > 0 {
+			// Collect all models from modelRefs
+			models := make([]string, 0, len(decisionResult.Decision.ModelRefs))
+			for _, modelRef := range decisionResult.Decision.ModelRefs {
+				models = append(models, modelRef.Model)
+			}
+			response.RecommendedModels = models
+			response.RoutingDecision = decisionResult.Decision.Name
+		}
+	} else {
+		// No decision matched
+		response.DecisionResult = &EvalDecisionResult{
+			DecisionName:     "",
+			UsedSignals:      &MatchedSignals{}, // Empty used signals
+			MatchedSignals:   matchedSignals,
+			UnmatchedSignals: unmatchedSignals,
+		}
+	}
+
+	return response
+}
+
+// extractUsedSignalsFromDecision extracts all signals used in a decision's rule configuration
+// This includes ALL signals defined in the decision rules, not just the ones that matched
+func (s *ClassificationService) extractUsedSignalsFromDecision(decision *config.Decision) *MatchedSignals {
+	usedSignals := &MatchedSignals{}
+
+	// Recursively extract signals from rule combination
+	s.extractSignalsFromRuleCombination(decision.Rules, usedSignals)
+
+	return usedSignals
+}
+
+// extractSignalsFromRuleCombination recursively extracts signals from a rule combination
+func (s *ClassificationService) extractSignalsFromRuleCombination(rules config.RuleCombination, usedSignals *MatchedSignals) {
+	for _, condition := range rules.Conditions {
+		signalType := strings.ToLower(strings.TrimSpace(condition.Type))
+		signalName := strings.TrimSpace(condition.Name)
+
+		// Add to appropriate field based on type
+		switch signalType {
+		case "keyword":
+			if !contains(usedSignals.Keywords, signalName) {
+				usedSignals.Keywords = append(usedSignals.Keywords, signalName)
+			}
+		case "embedding":
+			if !contains(usedSignals.Embeddings, signalName) {
+				usedSignals.Embeddings = append(usedSignals.Embeddings, signalName)
+			}
+		case "domain":
+			if !contains(usedSignals.Domains, signalName) {
+				usedSignals.Domains = append(usedSignals.Domains, signalName)
+			}
+		case "fact_check":
+			if !contains(usedSignals.FactCheck, signalName) {
+				usedSignals.FactCheck = append(usedSignals.FactCheck, signalName)
+			}
+		case "user_feedback":
+			if !contains(usedSignals.UserFeedback, signalName) {
+				usedSignals.UserFeedback = append(usedSignals.UserFeedback, signalName)
+			}
+		case "preference":
+			if !contains(usedSignals.Preferences, signalName) {
+				usedSignals.Preferences = append(usedSignals.Preferences, signalName)
+			}
+		case "language":
+			if !contains(usedSignals.Language, signalName) {
+				usedSignals.Language = append(usedSignals.Language, signalName)
+			}
+		case "context":
+			if !contains(usedSignals.Context, signalName) {
+				usedSignals.Context = append(usedSignals.Context, signalName)
+			}
+		case "complexity":
+			if !contains(usedSignals.Complexity, signalName) {
+				usedSignals.Complexity = append(usedSignals.Complexity, signalName)
+			}
+		case "jailbreak":
+			if !contains(usedSignals.Jailbreak, signalName) {
+				usedSignals.Jailbreak = append(usedSignals.Jailbreak, signalName)
+			}
+		case "pii":
+			if !contains(usedSignals.PII, signalName) {
+				usedSignals.PII = append(usedSignals.PII, signalName)
+			}
+		}
+	}
+}
+
+// contains checks if a string slice contains a specific string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// getUnmatchedSignals returns all configured signals that were not matched
+func (s *ClassificationService) getUnmatchedSignals(signals *classification.SignalResults) *MatchedSignals {
+	unmatched := &MatchedSignals{}
+
+	if s.classifier == nil || s.config == nil {
+		return unmatched
+	}
+
+	// Helper function to check if a signal is matched
+	isMatched := func(signalName string, matchedList []string) bool {
+		for _, matched := range matchedList {
+			if matched == signalName {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Check keyword rules
+	for _, rule := range s.classifier.Config.KeywordRules {
+		if !isMatched(rule.Name, signals.MatchedKeywordRules) {
+			unmatched.Keywords = append(unmatched.Keywords, rule.Name)
+		}
+	}
+
+	// Check embedding rules
+	for _, rule := range s.classifier.Config.EmbeddingRules {
+		if !isMatched(rule.Name, signals.MatchedEmbeddingRules) {
+			unmatched.Embeddings = append(unmatched.Embeddings, rule.Name)
+		}
+	}
+
+	// Check domain rules (categories)
+	for _, category := range s.classifier.Config.Categories {
+		if !isMatched(category.Name, signals.MatchedDomainRules) {
+			unmatched.Domains = append(unmatched.Domains, category.Name)
+		}
+	}
+
+	// Check fact-check rules
+	for _, rule := range s.classifier.Config.FactCheckRules {
+		if !isMatched(rule.Name, signals.MatchedFactCheckRules) {
+			unmatched.FactCheck = append(unmatched.FactCheck, rule.Name)
+		}
+	}
+
+	// Check user feedback rules
+	for _, rule := range s.classifier.Config.UserFeedbackRules {
+		if !isMatched(rule.Name, signals.MatchedUserFeedbackRules) {
+			unmatched.UserFeedback = append(unmatched.UserFeedback, rule.Name)
+		}
+	}
+
+	// Check preference rules
+	for _, rule := range s.classifier.Config.PreferenceRules {
+		if !isMatched(rule.Name, signals.MatchedPreferenceRules) {
+			unmatched.Preferences = append(unmatched.Preferences, rule.Name)
+		}
+	}
+
+	// Check language rules
+	for _, rule := range s.classifier.Config.LanguageRules {
+		if !isMatched(rule.Name, signals.MatchedLanguageRules) {
+			unmatched.Language = append(unmatched.Language, rule.Name)
+		}
+	}
+
+	// Check context rules
+	for _, rule := range s.classifier.Config.ContextRules {
+		if !isMatched(rule.Name, signals.MatchedContextRules) {
+			unmatched.Context = append(unmatched.Context, rule.Name)
+		}
+	}
+
+	// Check complexity rules
+	for _, rule := range s.classifier.Config.ComplexityRules {
+		if !isMatched(rule.Name, signals.MatchedComplexityRules) {
+			unmatched.Complexity = append(unmatched.Complexity, rule.Name)
+		}
+	}
+
+	// Check jailbreak rules
+	for _, rule := range s.classifier.Config.JailbreakRules {
+		if !isMatched(rule.Name, signals.MatchedJailbreakRules) {
+			unmatched.Jailbreak = append(unmatched.Jailbreak, rule.Name)
+		}
+	}
+
+	// Check PII rules
+	for _, rule := range s.classifier.Config.PIIRules {
+		if !isMatched(rule.Name, signals.MatchedPIIRules) {
+			unmatched.PII = append(unmatched.PII, rule.Name)
+		}
+	}
+
+	return unmatched
 }

@@ -5,6 +5,8 @@ import (
 	"net"
 	"regexp"
 	"strings"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
 var (
@@ -50,13 +52,16 @@ func validateIPAddress(address string) error {
 	return nil
 }
 
-// validateVLLMEndpoints validates the address format of all vLLM endpoints
-func validateVLLMEndpoints(endpoints []VLLMEndpoint) error {
-	for _, endpoint := range endpoints {
-		if err := validateIPAddress(endpoint.Address); err != nil {
-			return fmt.Errorf("vLLM endpoint '%s' address validation failed: %w\n\nSupported formats:\n- IPv4: 192.168.1.1, 127.0.0.1\n- IPv6: ::1, 2001:db8::1\n\nUnsupported formats:\n- Domain names: example.com, localhost\n- Protocol prefixes: http://, https://\n- Paths: /api/v1, /health\n- Ports in address: use 'port' field instead", endpoint.Name, err)
-		}
+// validateVLLMClassifierConfig validates vLLM classifier configuration when use_vllm is true
+// Note: vLLM configuration is now in external_models, not in PromptGuardConfig
+// This function is kept for backward compatibility but does minimal validation
+func validateVLLMClassifierConfig(cfg *PromptGuardConfig) error {
+	if !cfg.UseVLLM {
+		return nil // Skip validation if not using vLLM
 	}
+
+	// When use_vllm is true, external_models with model_role="guardrail" is required
+	// This will be validated in the main config validation
 	return nil
 }
 
@@ -92,12 +97,13 @@ func validateConfigStructure(cfg *RouterConfig) error {
 		return nil
 	}
 
-	// File mode: validate decisions have at least one model ref
-	for _, decision := range cfg.Decisions {
-		if len(decision.ModelRefs) == 0 {
-			return fmt.Errorf("decision '%s' has no modelRefs defined - each decision must have at least one model", decision.Name)
-		}
+	hasLegacyLatencyConfig := hasLegacyLatencyRoutingConfig(cfg)
+	if hasLegacyLatencyConfig {
+		return fmt.Errorf("legacy latency config is no longer supported; use decision.algorithm.type=latency_aware and remove signals.latency_rules / conditions.type=latency")
+	}
 
+	// File mode: validate decisions model refs
+	for _, decision := range cfg.Decisions {
 		// Validate each model ref has the required fields
 		for i, modelRef := range decision.ModelRefs {
 			if modelRef.Model == "" {
@@ -114,14 +120,356 @@ func validateConfigStructure(cfg *RouterConfig) error {
 				}
 			}
 		}
+
+		// Validate algorithm one-of semantics and type-specific configuration.
+		if err := validateDecisionAlgorithmConfig(decision.Name, decision.Algorithm); err != nil {
+			return err
+		}
 	}
 
-	// Validate vLLM endpoints address formats
-	if err := validateVLLMEndpoints(cfg.VLLMEndpoints); err != nil {
+	// Validate plugin configurations within each decision
+	for _, decision := range cfg.Decisions {
+		if imageGenCfg := decision.GetImageGenConfig(); imageGenCfg != nil {
+			if err := imageGenCfg.Validate(); err != nil {
+				return fmt.Errorf("decision '%s': %w", decision.Name, err)
+			}
+		}
+	}
+
+	// Validate modality detector configuration
+	if cfg.ModalityDetector.Enabled {
+		if err := cfg.ModalityDetector.ModalityDetectionConfig.Validate(); err != nil {
+			return fmt.Errorf("modality_detector: %w", err)
+		}
+	}
+
+	// Validate image_gen_backends entries
+	if err := validateImageGenBackends(cfg); err != nil {
+		return err
+	}
+
+	// Validate modality decision constraints
+	if err := validateModalityDecisions(cfg); err != nil {
+		return err
+	}
+
+	// Validate modality rules (signal names must be valid)
+	if err := validateModalityRules(cfg.Signals.ModalityRules); err != nil {
+		return err
+	}
+
+	// Validate vLLM classifier configurations
+	if err := validateVLLMClassifierConfig(&cfg.PromptGuard); err != nil {
+		return err
+	}
+
+	// Validate advanced tool filtering configuration (opt-in)
+	if err := validateAdvancedToolFilteringConfig(cfg); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// validateModalityRules validates modality rule configurations
+func validateModalityRules(rules []ModalityRule) error {
+	validNames := map[string]bool{"AR": true, "DIFFUSION": true, "BOTH": true}
+	for i, rule := range rules {
+		if rule.Name == "" {
+			return fmt.Errorf("modality_rules[%d]: name cannot be empty", i)
+		}
+		if !validNames[rule.Name] {
+			return fmt.Errorf("modality_rules[%d] (%s): name must be one of \"AR\", \"DIFFUSION\", or \"BOTH\"", i, rule.Name)
+		}
+	}
+	return nil
+}
+
+// validateModalityDecisions validates that decisions using modality signals have correct modelRefs.
+// Specifically, a BOTH decision must reference both an AR and a diffusion model, OR a single omni model.
+func validateModalityDecisions(cfg *RouterConfig) error {
+	for _, decision := range cfg.Decisions {
+		for _, cond := range decision.Rules.Conditions {
+			if cond.Type != SignalTypeModality || cond.Name != "BOTH" {
+				continue
+			}
+
+			// This decision matches modality=BOTH — must have both AR and diffusion modelRefs,
+			// OR at least one omni model that can handle both.
+			hasAR := false
+			hasDiffusion := false
+			hasOmni := false
+			for _, ref := range decision.ModelRefs {
+				if params, ok := cfg.ModelConfig[ref.Model]; ok {
+					switch params.Modality {
+					case "ar":
+						hasAR = true
+					case "diffusion":
+						hasDiffusion = true
+					case "omni":
+						hasOmni = true
+					}
+				}
+			}
+
+			// An omni model satisfies both AR and diffusion requirements
+			if hasOmni {
+				continue
+			}
+
+			if !hasAR || !hasDiffusion {
+				return fmt.Errorf("decision %q uses modality condition \"BOTH\" but modelRefs must include both an AR model (modality: \"ar\") and a diffusion model (modality: \"diffusion\"), or an omni model (modality: \"omni\")", decision.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// validateImageGenBackends validates image_gen_backends entries and model_config references
+func validateImageGenBackends(cfg *RouterConfig) error {
+	validTypes := map[string]bool{"vllm_omni": true, "openai": true}
+
+	for name, entry := range cfg.ImageGenBackends {
+		if entry.Type == "" {
+			return fmt.Errorf("image_gen_backends[%s]: type is required (one of \"vllm_omni\", \"openai\")", name)
+		}
+		if !validTypes[entry.Type] {
+			return fmt.Errorf("image_gen_backends[%s]: unknown type %q (must be \"vllm_omni\" or \"openai\")", name, entry.Type)
+		}
+
+		switch entry.Type {
+		case "vllm_omni":
+			if entry.BaseURL == "" {
+				return fmt.Errorf("image_gen_backends[%s]: base_url is required for vllm_omni", name)
+			}
+		case "openai":
+			if entry.APIKey == "" {
+				return fmt.Errorf("image_gen_backends[%s]: api_key is required for openai", name)
+			}
+		}
+	}
+
+	// Validate model_config image_gen_backend references
+	for modelName, params := range cfg.ModelConfig {
+		if params.ImageGenBackend != "" {
+			if _, ok := cfg.ImageGenBackends[params.ImageGenBackend]; !ok {
+				return fmt.Errorf("model_config[%s]: image_gen_backend %q not found in image_gen_backends", modelName, params.ImageGenBackend)
+			}
+		}
+	}
+
+	return nil
+}
+
+func hasLegacyLatencyRoutingConfig(cfg *RouterConfig) bool {
+	for _, decision := range cfg.Decisions {
+		for _, condition := range decision.Rules.Conditions {
+			if condition.Type == "latency" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func validateDecisionAlgorithmConfig(decisionName string, algorithm *AlgorithmConfig) error {
+	if algorithm == nil {
+		return nil
+	}
+
+	normalizedType := strings.ToLower(strings.TrimSpace(algorithm.Type))
+	displayType := strings.TrimSpace(algorithm.Type)
+	if displayType == "" {
+		displayType = "<empty>"
+	}
+
+	configuredBlocks := make([]string, 0, 10)
+	addBlock := func(name string, configured bool) {
+		if configured {
+			configuredBlocks = append(configuredBlocks, name)
+		}
+	}
+
+	addBlock("confidence", algorithm.Confidence != nil)
+	addBlock("ratings", algorithm.Ratings != nil)
+	addBlock("remom", algorithm.ReMoM != nil)
+	addBlock("elo", algorithm.Elo != nil)
+	addBlock("router_dc", algorithm.RouterDC != nil)
+	addBlock("automix", algorithm.AutoMix != nil)
+	addBlock("hybrid", algorithm.Hybrid != nil)
+	addBlock("rl_driven", algorithm.RLDriven != nil)
+	addBlock("gmtrouter", algorithm.GMTRouter != nil)
+	addBlock("latency_aware", algorithm.LatencyAware != nil)
+
+	if len(configuredBlocks) > 1 {
+		return fmt.Errorf(
+			"decision '%s': algorithm.type=%s cannot be combined with multiple algorithm config blocks: %s",
+			decisionName,
+			displayType,
+			strings.Join(configuredBlocks, ", "),
+		)
+	}
+
+	expectedBlockByType := map[string]string{
+		"confidence":    "confidence",
+		"ratings":       "ratings",
+		"remom":         "remom",
+		"elo":           "elo",
+		"router_dc":     "router_dc",
+		"automix":       "automix",
+		"hybrid":        "hybrid",
+		"rl_driven":     "rl_driven",
+		"gmtrouter":     "gmtrouter",
+		"latency_aware": "latency_aware",
+	}
+
+	expectedBlock, hasExpectedBlock := expectedBlockByType[normalizedType]
+	if !hasExpectedBlock {
+		if len(configuredBlocks) > 0 {
+			return fmt.Errorf(
+				"decision '%s': algorithm.type=%s cannot be used with algorithm.%s configuration",
+				decisionName,
+				displayType,
+				configuredBlocks[0],
+			)
+		}
+		return nil
+	}
+
+	if len(configuredBlocks) == 1 && configuredBlocks[0] != expectedBlock {
+		return fmt.Errorf(
+			"decision '%s': algorithm.type=%s requires algorithm.%s configuration; found algorithm.%s",
+			decisionName,
+			displayType,
+			expectedBlock,
+			configuredBlocks[0],
+		)
+	}
+
+	if normalizedType == "latency_aware" {
+		if algorithm.LatencyAware == nil {
+			return fmt.Errorf("decision '%s': algorithm.type=latency_aware requires algorithm.latency_aware configuration", decisionName)
+		}
+		if err := validateLatencyAwareAlgorithmConfig(algorithm.LatencyAware); err != nil {
+			return fmt.Errorf("decision '%s', algorithm.latency_aware: %w", decisionName, err)
+		}
+	}
+
+	return nil
+}
+
+// validateLatencyAwareAlgorithmConfig validates latency_aware algorithm configuration.
+func validateLatencyAwareAlgorithmConfig(cfg *LatencyAwareAlgorithmConfig) error {
+	hasTPOTPercentile := cfg.TPOTPercentile > 0
+	hasTTFTPercentile := cfg.TTFTPercentile > 0
+
+	if !hasTPOTPercentile && !hasTTFTPercentile {
+		return fmt.Errorf("must specify at least one of tpot_percentile (1-100) or ttft_percentile (1-100). RECOMMENDED: use both for comprehensive latency evaluation")
+	}
+
+	warnIncompleteLatencyAwarePercentiles(hasTPOTPercentile, hasTTFTPercentile)
+
+	for _, field := range []struct {
+		name    string
+		value   int
+		enabled bool
+	}{
+		{name: "tpot_percentile", value: cfg.TPOTPercentile, enabled: hasTPOTPercentile},
+		{name: "ttft_percentile", value: cfg.TTFTPercentile, enabled: hasTTFTPercentile},
+	} {
+		if err := validateLatencyAwarePercentile(field.name, field.value, field.enabled); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func warnIncompleteLatencyAwarePercentiles(hasTPOTPercentile bool, hasTTFTPercentile bool) {
+	if hasTPOTPercentile && !hasTTFTPercentile {
+		logging.Warnf("algorithm.latency_aware: only tpot_percentile is set. RECOMMENDED: also set ttft_percentile for comprehensive latency evaluation (user-perceived latency)")
+	}
+	if !hasTPOTPercentile && hasTTFTPercentile {
+		logging.Warnf("algorithm.latency_aware: only ttft_percentile is set. RECOMMENDED: also set tpot_percentile for comprehensive latency evaluation (token generation throughput)")
+	}
+}
+
+func validateLatencyAwarePercentile(name string, value int, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if value < 1 || value > 100 {
+		return fmt.Errorf("%s must be between 1 and 100, got: %d", name, value)
+	}
+	return nil
+}
+
+func validateAdvancedToolFilteringConfig(cfg *RouterConfig) error {
+	if cfg == nil || cfg.Tools.AdvancedFiltering == nil {
+		return nil
+	}
+
+	advanced := cfg.Tools.AdvancedFiltering
+	if !advanced.Enabled {
+		return nil
+	}
+
+	for _, field := range []struct {
+		name  string
+		value *int
+	}{
+		{name: "candidate_pool_size", value: advanced.CandidatePoolSize},
+		{name: "min_lexical_overlap", value: advanced.MinLexicalOverlap},
+	} {
+		if err := validateAdvancedToolFilteringNonNegativeInt(field.name, field.value); err != nil {
+			return err
+		}
+	}
+
+	for _, field := range []struct {
+		name  string
+		value *float32
+	}{
+		{name: "min_combined_score", value: advanced.MinCombinedScore},
+		{name: "category_confidence_threshold", value: advanced.CategoryConfidenceThreshold},
+	} {
+		if err := validateAdvancedToolFilteringUnitFloat(field.name, field.value); err != nil {
+			return err
+		}
+	}
+
+	weightFields := []struct {
+		name  string
+		value *float32
+	}{
+		{"embed", advanced.Weights.Embed},
+		{"lexical", advanced.Weights.Lexical},
+		{"tag", advanced.Weights.Tag},
+		{"name", advanced.Weights.Name},
+		{"category", advanced.Weights.Category},
+	}
+	for _, field := range weightFields {
+		if err := validateAdvancedToolFilteringUnitFloat("weights."+field.name, field.value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateAdvancedToolFilteringNonNegativeInt(name string, value *int) error {
+	if value == nil || *value >= 0 {
+		return nil
+	}
+	return fmt.Errorf("tools.advanced_filtering.%s must be >= 0", name)
+}
+
+func validateAdvancedToolFilteringUnitFloat(name string, value *float32) error {
+	if value == nil || (*value >= 0.0 && *value <= 1.0) {
+		return nil
+	}
+	return fmt.Errorf("tools.advanced_filtering.%s must be between 0.0 and 1.0", name)
 }
 
 // validateLoRAName checks if the specified LoRA name is defined in the model's configuration

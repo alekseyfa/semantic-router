@@ -37,13 +37,47 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # Single route using original destination cluster
+              # Anthropic API route (matches all claude-* models)
+              - match:
+                  prefix: "/"
+                  headers:
+                  - name: x-selected-model
+                    string_match:
+                      prefix: "claude-"
+                route:
+                  cluster: anthropic_api_cluster
+                  timeout: 300s
+                  host_rewrite_literal: "api.anthropic.com"
+              # OpenAI API route (matches gpt-* and o1-* and o3-* models)
+              - match:
+                  prefix: "/"
+                  headers:
+                  - name: x-selected-model
+                    string_match:
+                      safe_regex:
+                        regex: "^(gpt-|o1-|o3-|chatgpt-).*"
+                route:
+                  cluster: openai_api_cluster
+                  timeout: 300s
+                  host_rewrite_literal: "api.openai.com"
+              # Default route using original destination cluster
               - match:
                   prefix: "/"
                 route:
                   cluster: vllm_dynamic_cluster
                   timeout: 300s
           http_filters:
+          # ext_authz filter — validates Bearer token via Authorino (gRPC)
+          # On success, Authorino injects x-user-openai-key / x-user-anthropic-key headers
+          # failure_mode_allow: true so local dev without Authorino still works
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: authorino_service
+              transport_api_version: V3
+              failure_mode_allow: true
           - name: envoy.filters.http.ext_proc
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
@@ -97,20 +131,91 @@ static_resources:
                 address: 127.0.0.1
                 port_value: 50051
 
-  # Dynamic vLLM cluster using original destination
+  # Local vLLM backend (static cluster for local dev)
+  # Points to vllm-xpu container running on host port 11434
   - name: vllm_dynamic_cluster
     connect_timeout: 300s
     per_connection_buffer_limit_bytes: 52428800
-    type: ORIGINAL_DST
-    lb_policy: CLUSTER_PROVIDED
-    original_dst_lb_config:
-      use_http_header: true
-      http_header_name: "x-vsr-destination-endpoint"
+    type: STATIC
+    lb_policy: ROUND_ROBIN
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         explicit_http_config:
           http_protocol_options: {}
+    load_assignment:
+      cluster_name: vllm_dynamic_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 11434
+
+  # Authorino authorization service (gRPC)
+  - name: authorino_service
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: authorino_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 50052
+
+  # OpenAI API cluster
+  - name: openai_api_cluster
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    connect_timeout: 60s
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: openai_api_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: api.openai.com
+                port_value: 443
+            hostname: "api.openai.com"
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: api.openai.com
+
+  # Anthropic API cluster
+  - name: anthropic_api_cluster
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    connect_timeout: 60s
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: anthropic_api_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: api.anthropic.com
+                port_value: 443
+            hostname: "api.anthropic.com"
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: api.anthropic.com
 
 admin:
   address:

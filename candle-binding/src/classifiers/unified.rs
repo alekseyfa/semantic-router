@@ -11,6 +11,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::ffi::embedding::GLOBAL_MODEL_FACTORY;
 use crate::model_architectures::config::{DualPathConfig, LoRAConfig, TraditionalConfig};
 use crate::model_architectures::routing::{DualPathRouter, ProcessingRequirements};
 use crate::model_architectures::traits::*;
@@ -501,9 +502,10 @@ impl DualPathUnifiedClassifier {
             ModelType::Traditional => {
                 self.classify_with_traditional_path_optimized(texts, tasks, start_time)
             }
-            ModelType::Qwen3Embedding | ModelType::GemmaEmbedding => {
-                // Embedding models (Qwen3/Gemma) are NOT for classification
-                // They generate embeddings, not class predictions
+            ModelType::Qwen3Embedding
+            | ModelType::GemmaEmbedding
+            | ModelType::MmBertEmbedding
+            | ModelType::MultiModalEmbedding => {
                 return Err(UnifiedClassifierError::ProcessingError(
                     format!(
                         "Embedding model {:?} does not support classification tasks. \
@@ -756,11 +758,10 @@ impl DualPathUnifiedClassifier {
                 stats.traditional_total_time += result.total_processing_time_ms;
                 stats.traditional_request_count += 1;
             }
-            ModelType::Qwen3Embedding | ModelType::GemmaEmbedding => {
-                // Embedding models don't participate in classification
-                // Performance tracking is handled separately via update_embedding_stats()
-                // This branch should not be reached in normal operation
-            }
+            ModelType::Qwen3Embedding
+            | ModelType::GemmaEmbedding
+            | ModelType::MmBertEmbedding
+            | ModelType::MultiModalEmbedding => {}
         }
     }
 
@@ -1024,6 +1025,45 @@ impl DualPathUnifiedClassifier {
             model_type
         };
 
+        // Validate model availability and fall back if necessary
+        let model_type = match model_type {
+            ModelType::GemmaEmbedding => {
+                // Check if Gemma is available
+                if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
+                    if factory.get_gemma_model().is_none() {
+                        // Gemma not available, fall back to Qwen3
+                        eprintln!(
+                            "WARNING: GemmaEmbedding selected but not available, falling back to Qwen3Embedding"
+                        );
+                        ModelType::Qwen3Embedding
+                    } else {
+                        ModelType::GemmaEmbedding
+                    }
+                } else {
+                    // No factory available, fall back to Qwen3
+                    eprintln!(
+                        "WARNING: ModelFactory not initialized, falling back to Qwen3Embedding"
+                    );
+                    ModelType::Qwen3Embedding
+                }
+            }
+            ModelType::Qwen3Embedding => {
+                // Qwen3 is the default, should always be available
+                // But verify just in case
+                if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
+                    if factory.get_qwen3_model().is_none() {
+                        return Err(UnifiedClassifierError::ProcessingError(
+                            "Qwen3Embedding selected but not available and no fallback available"
+                                .to_string(),
+                        ));
+                    }
+                }
+                ModelType::Qwen3Embedding
+            }
+            // For non-embedding types, pass through
+            other => other,
+        };
+
         // Log routing decision for monitoring
         if self.config.embedding.enable_performance_tracking {
             println!(
@@ -1062,12 +1102,10 @@ impl DualPathUnifiedClassifier {
                 // Traditional is the baseline
                 0.0
             }
-            ModelType::Qwen3Embedding | ModelType::GemmaEmbedding => {
-                // Embedding models don't participate in classification performance tracking
-                // Their metrics (latency, throughput) are tracked separately via update_embedding_stats()
-                // Performance comparison is not meaningful in classification context
-                0.0
-            }
+            ModelType::Qwen3Embedding
+            | ModelType::GemmaEmbedding
+            | ModelType::MmBertEmbedding
+            | ModelType::MultiModalEmbedding => 0.0,
         }
     }
 

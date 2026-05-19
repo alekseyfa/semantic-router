@@ -142,7 +142,8 @@ func populateCache(cache *InMemoryCache, size int) error {
 			query := queries[idx]
 			responseBody := []byte(fmt.Sprintf("Response for: %s", query))
 
-			err := cache.AddEntry(requestID, "test-model", query, []byte(query), responseBody)
+			err := cache.AddEntry(requestID,
+				"test-model", query, []byte(query), responseBody, -1)
 			if err != nil {
 				errors <- fmt.Errorf("failed to add entry %d: %w", idx, err)
 				return
@@ -167,7 +168,7 @@ func populateCache(cache *InMemoryCache, size int) error {
 	}
 
 	throughput := float64(size) / populateDuration.Seconds()
-	fmt.Printf("  ✓ Population complete: %d entries in %v (%.0f entries/sec)\n",
+	fmt.Printf("  Population complete: %d entries in %v (%.0f entries/sec)\n",
 		size, populateDuration.Round(time.Millisecond), throughput)
 
 	return nil
@@ -514,10 +515,10 @@ func initEmbeddingModelsOnce() error {
 	} else {
 		fmt.Println("QWEN3_MODEL_PATH not set, trying default paths...")
 		qwen3Paths = []string{
-			"./models/Qwen3-Embedding-0.6B",
-			"./candle-binding/models/Qwen3-Embedding-0.6B",
-			"../models/Qwen3-Embedding-0.6B",
-			"models/Qwen3-Embedding-0.6B",
+			"./models/mom-embedding-pro",
+			"./candle-binding/models/mom-embedding-pro",
+			"../models/mom-embedding-pro",
+			"models/mom-embedding-pro",
 		}
 	}
 
@@ -533,7 +534,7 @@ func initEmbeddingModelsOnce() error {
 		// Use InitEmbeddingModelsBatched with FIXED scheduler (returns Vec instead of Tensor!)
 		err := candle_binding.InitEmbeddingModelsBatched(path, maxBatchSize, maxWaitMs, useCPU)
 		if err == nil {
-			fmt.Printf("✓ Qwen3 embedding model initialized from: %s\n", path)
+			fmt.Printf("Qwen3 embedding model initialized from: %s\n", path)
 			fmt.Printf("  Device: %s\n", deviceType)
 			fmt.Printf("  TRUE Continuous batching: ENABLED ✨ (FIXED - no CUDA context errors!)\n")
 			fmt.Printf("    - Max batch size: %d requests\n", maxBatchSize)

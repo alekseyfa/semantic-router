@@ -13,6 +13,38 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
 )
 
+// handleRequestBodyDispatch routes body messages to the correct handler.
+//
+// BUFFERED mode (default): the message goes straight to handleRequestBody.
+//
+// STREAMED mode (streamed_body_mode: true in config): Envoy sends multiple
+// body messages. A StreamedBodyHandler accumulates chunks, detects the model
+// from the first few KB, and either passes through or accumulates for the
+// full pipeline on end_of_stream.
+func (r *OpenAIRouter) handleRequestBodyDispatch(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+	eos := v.RequestBody.GetEndOfStream()
+
+	// If we already have a handler from a previous chunk, continue streaming
+	if ctx.StreamedBody != nil {
+		resp, err := ctx.StreamedBody.HandleChunk(v.RequestBody, ctx)
+		if eos {
+			ctx.StreamedBody.Release()
+			ctx.StreamedBody = nil
+		}
+		return resp, err
+	}
+
+	// Decide mode based on config: only use streaming handler when explicitly enabled
+	streamedMode := r.Config != nil && r.Config.StreamedBodyMode
+	if streamedMode && !eos {
+		ctx.StreamedBody = newStreamedBodyHandler(r, ctx)
+		return ctx.StreamedBody.HandleChunk(v.RequestBody, ctx)
+	}
+
+	// BUFFERED mode or single-message STREAMED — use classic pipeline
+	return r.handleRequestBody(v, ctx)
+}
+
 // Process implements the ext_proc calls
 func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) error {
 	logging.Infof("Processing at stage [init]")
@@ -25,6 +57,13 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
+			// Mark streaming as aborted if it was a streaming response
+			// This prevents caching incomplete responses
+			if ctx.IsStreamingResponse && !ctx.StreamingComplete {
+				ctx.StreamingAborted = true
+				logging.Infof("Streaming response aborted before completion, will not cache")
+			}
+
 			// Handle EOF - this indicates the client has closed the stream gracefully
 			if errors.Is(err, io.EOF) {
 				logging.Infof("Stream ended gracefully")
@@ -35,7 +74,6 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			if s, ok := status.FromError(err); ok {
 				switch s.Code() {
 				case codes.Canceled:
-					metrics.RecordRequestError(ctx.RequestModel, "cancellation")
 					return nil
 				case codes.DeadlineExceeded:
 					logging.Infof("Stream deadline exceeded")
@@ -47,7 +85,6 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			// Handle context cancellation from the server-side context
 			if errors.Is(err, context.Canceled) {
 				logging.Infof("Stream canceled gracefully")
-				metrics.RecordRequestError(ctx.RequestModel, "cancellation")
 				return nil
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -73,7 +110,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			}
 
 		case *ext_proc.ProcessingRequest_RequestBody:
-			response, err := r.handleRequestBody(v, ctx)
+			response, err := r.handleRequestBodyDispatch(v, ctx)
 			if err != nil {
 				logging.Errorf("handleRequestBody failed: %v", err)
 				return err

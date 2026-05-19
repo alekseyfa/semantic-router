@@ -5,8 +5,6 @@ Thank you for your interest in contributing to the vLLM Semantic Router project!
 ## Table of Contents
 
 - [Development Setup](#development-setup)
-- [Prerequisites](#prerequisites)
-- [Building the Project](#building-the-project)
 - [Running Tests](#running-tests)
 - [Development Workflow](#development-workflow)
 - [Code Style and Standards](#code-style-and-standards)
@@ -20,13 +18,11 @@ Thank you for your interest in contributing to the vLLM Semantic Router project!
 
 Before you begin, ensure you have the following installed:
 
-- **Rust** (latest stable version)
-- **Go** 1.24.1 or later
-- **Hugging Face CLI** (`pip install huggingface_hub`)
+- **Docker** (or Podman)
 - **Make** (for build automation)
-- **Python** 3.8+ (Optional: for training and testing)
+- **Python** 3.10+ (Optional: for training and testing)
 
-### Initial Setup
+### Quick Start
 
 1. **Clone the repository:**
 
@@ -35,63 +31,59 @@ Before you begin, ensure you have the following installed:
    cd semantic-router
    ```
 
-2. **Download required models:**
+2. **Use the canonical local image workflow:**
 
    ```bash
-   make download-models
+   make vllm-sr-dev
+   vllm-sr serve --image-pull-policy never
    ```
 
-   This downloads the pre-trained classification models from Hugging Face.
+   For AMD ROCm development:
 
-3. **Install Python dependencies(Optional):**
+   ```bash
+   make vllm-sr-dev VLLM_SR_PLATFORM=amd
+   vllm-sr serve --image-pull-policy never --platform amd
+   ```
+
+   This workflow:
+   - Rebuilds the local image
+   - Installs the `vllm-sr` CLI tool
+   - Uses the local image only, without pulling a remote fallback
+
+3. **Install Python dependencies (Optional):**
 
    ```bash
    # For training and development
    pip install -r requirements.txt
    
    # For end-to-end testing
-   pip install -r e2e-tests/requirements.txt
-   ```
-
-## Building the Project
-
-The project consists of multiple components that need to be built in order:
-
-### Build Everything
-
-```bash
-make build
-```
-
-### Build Individual Components
-
-1. **Rust library (Candle binding):**
-
-   ```bash
-   make rust
-   ```
-
-2. **Go router:**
-
-   ```bash
-   make build-router
-   ```
-
-### Running the System
-
-1. **Start Envoy proxy** (in one terminal):
-
-   ```bash
-   make run-envoy
-   ```
-
-2. **Start the semantic router** (in another terminal):
-
-   ```bash
-   make run-router
+   pip install -r e2e/testing/requirements.txt
    ```
 
 ## Running Tests
+
+### Agent Gates
+
+The repository-specific agent harness is indexed in [docs/agent/README.md](docs/agent/README.md). Treat [AGENTS.md](AGENTS.md) as the short entrypoint and `docs/agent/*` plus `tools/agent/*` as the durable source of truth.
+If a real architecture or code/spec gap remains after your change, add or update the durable debt entry indexed from [docs/agent/tech-debt/README.md](docs/agent/tech-debt/README.md).
+
+Read these first:
+
+- [docs/agent/testing-strategy.md](docs/agent/testing-strategy.md)
+- [docs/agent/module-boundaries.md](docs/agent/module-boundaries.md)
+
+Use the agent-specific gates for changed files:
+
+```bash
+make agent-bootstrap
+make agent-validate
+make agent-scorecard
+make agent-report ENV=cpu CHANGED_FILES="path/one,path/two"
+make agent-ci-gate CHANGED_FILES="path/one,path/two"
+make agent-feature-gate ENV=cpu CHANGED_FILES="path/one,path/two"
+```
+
+`ENV=amd` is required when platform-specific behavior changed.
 
 ### Unit Tests
 
@@ -121,7 +113,8 @@ Test different routing scenarios:
 
 ```bash
 # Test model auto-selection
-make test-prompt
+make test-auto-prompt-reasoning
+make test-auto-prompt-no-reasoning
 
 # Test PII detection
 make test-pii
@@ -139,16 +132,16 @@ Ensure both Envoy and the router are running, then:
 
 ```bash
 # Run all e2e tests
-python e2e-tests/run_all_tests.py
+python e2e/testing/run_all_tests.py
 
 # Run specific test
-python e2e-tests/00-client-request-test.py
+python e2e/testing/00-client-request-test.py
 
 # Run tests matching a pattern
-python e2e-tests/run_all_tests.py --pattern "0*-*.py"
+python e2e/testing/run_all_tests.py --pattern "0*-*.py"
 
 # Check if services are running
-python e2e-tests/run_all_tests.py --check-only
+python e2e/testing/run_all_tests.py --check-only
 ```
 
 The test suite includes:
@@ -175,35 +168,31 @@ The test suite includes:
 3. **Build and test:**
 
    ```bash
-   make clean
-   make build
-   make test
+   make agent-report ENV=cpu CHANGED_FILES="path/one,path/two"
+   make agent-ci-gate CHANGED_FILES="path/one,path/two"
+   make agent-feature-gate ENV=cpu CHANGED_FILES="path/one,path/two"
    ```
 
 4. **Run end-to-end tests:**
 
    ```bash
-   # Start services
-   make run-envoy &
-   make run-router &
-   
-   # Run tests
-   python e2e-tests/run_all_tests.py
+   make agent-e2e-affected CHANGED_FILES="path/one,path/two"
+   # Or run a specific profile directly
+   make e2e-test E2E_PROFILE=ai-gateway
    ```
 
 5. **Commit your changes:**
 
-   Commit your changes with a clear message, making sure to **sign off** on your work using the `-s` flag. This is required by the project's **Developer Certificate of Origin (DCO)**.
+   Commit your changes with a clear message, making sure to **sign off** on your work using the `-s` flag. This is required by the project's **Developer Certificate of Origin (DCO)**. The repository does not require commit messages to use the PR title classification prefixes.
 
    ```bash
    git add .
-   git commit -s -m "feat: add your feature description"
+   git commit -s -m "clarify PR title guidance"
    ```
 
 ### Debugging
 
-- **Envoy logs:** Check the terminal running `make run-envoy` for detailed request/response logs
-- **Router logs:** Check the terminal running `make run-router` for classification and routing decisions
+- **View logs:** Use `vllm-sr logs` to view service logs
 - **Rust library:** Use `RUST_LOG=debug` environment variable for detailed Rust logs
 - **Go library:** Use `SR_LOG_LEVEL=debug` environment variable for detailed Go logs
 
@@ -234,6 +223,8 @@ pre-commit install
 
 # Run all checks
 pre-commit run --all-files
+# OR
+make precommit-local
 ```
 
 ### Go Code
@@ -242,10 +233,8 @@ pre-commit run --all-files
 - Use meaningful variable and function names
 - Add comments for exported functions and types
 - Write unit tests for new functionality
-- **Keep Go modules tidy:** Run `go mod tidy` in the appropriate directory after adding or removing dependencies
-  - For `candle-binding`: `cd candle-binding && go mod tidy`
-  - For `src/semantic-router`: `cd src/semantic-router && go mod tidy`
-  - The CI will automatically check that `go.mod` and `go.sum` files are tidy using `make check-go-mod-tidy`
+- **Keep Go modules tidy:** Run `make check-go-mod-tidy` to verify all modules are tidy
+- **Lint Go code:** Run `make go-lint` to check for issues, or `make go-lint-fix` to auto-fix
 
 ### Rust Code
 
@@ -266,7 +255,7 @@ pre-commit run --all-files
 
    ```bash
    make test
-   python e2e-tests/run_all_tests.py
+   python e2e/testing/run_all_tests.py
    ```
 
    The `make test` command includes:
@@ -275,6 +264,7 @@ pre-commit run --all-files
    - Unit tests for all components
 
 2. **Create a pull request** with:
+   - A classified PR title using the repository prefixes from [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md), such as `[Doc] Clarify PR title guidance` or `[Router][CI/Build] Tighten affected test selection`
    - Clear description of changes
    - Reference to any related issues
    - Test results and validation steps
@@ -287,7 +277,7 @@ pre-commit run --all-files
 ├── candle-binding/          # Rust library for BERT classification
 ├── src/semantic-router/     # Go implementation of the router
 ├── src/training/           # Model training scripts
-├── e2e-tests/              # End-to-end test suite
+├── e2e/testing/              # End-to-end test suite
 ├── config/                 # Configuration files
 ├── docs/                   # Documentation
 ├── deploy/                 # Deployment configurations

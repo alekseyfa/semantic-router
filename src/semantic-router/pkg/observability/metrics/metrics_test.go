@@ -255,3 +255,12 @@ func TestCustomBatchSizeRanges(t *testing.T) {
 	// Restore original config
 	SetBatchMetricsConfig(originalConfig)
 }
+
+// TestUnverifiedFactualResponseMetric tests the unverified factual response counter
+func TestUnverifiedFactualResponseMetric(_ *testing.T) {
+	// Record multiple unverified responses
+	for i := 0; i < 5; i++ {
+		RecordUnverifiedFactualResponse()
+	}
+	// The test passes if no panic occurs - Prometheus counters are monotonic
+}
