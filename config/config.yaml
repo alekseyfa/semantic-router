@@ -10,6 +10,11 @@
 #   "models/mom-embedding-pro": "Qwen/Qwen3-Embedding-0.6B"
 #   "models/mom-embedding-flash": "google/embeddinggemma-300m"
 
+# When true, the router asks Envoy to recompute the route after rewriting the
+# x-selected-model / x-vsr-destination-endpoint headers. Required for two-cluster
+# routing setups where Envoy picks the upstream cluster from x-selected-model.
+clear_route_cache: true
+
 # Response API Configuration
 # Enables OpenAI Response API support with conversation chaining
 response_api:
@@ -91,6 +96,8 @@ tools:
 prompt_guard:
   enabled: true  # Global default - can be overridden per category with jailbreak_enabled
   use_modernbert: false
+  use_openvino: true
+  openvino_device: "CPU"
   model_id: "models/mom-jailbreak-classifier"
   threshold: 0.7
   use_cpu: true
@@ -102,12 +109,16 @@ classifier:
     model_id: "models/mom-domain-classifier"
     threshold: 0.6
     use_cpu: true
+    use_openvino: true
+    openvino_device: "CPU"
     category_mapping_path: "models/mom-domain-classifier/category_mapping.json"
   pii_model:
     model_id: "models/mom-pii-classifier"
     use_modernbert: false
     threshold: 0.9
     use_cpu: true
+    use_openvino: true
+    openvino_device: "CPU"
   pii_mapping_path: "models/mom-pii-classifier/label_mapping.json"
 
 # Hallucination mitigation configuration
@@ -141,15 +152,28 @@ hallucination_mitigation:
 # Supported formats: 127.0.0.1, 192.168.1.1, ::1, 2001:db8::1, example.com, localhost
 # Note: Use the 'port' field for port numbers, not in the address field
 vllm_endpoints:
-  - name: "ollama"
-    address: "127.0.0.1"  # Ollama endpoint for testing
+  - name: "xpu-3b"
+    address: "127.0.0.1"
     port: 11434
     weight: 1
+    type: "vllm"
+  - name: "xpu-7b"
+    address: "127.0.0.1"
+    port: 11435
+    weight: 1
+    type: "vllm"
 
 model_config:
   "qwen2.5:3b":
-    reasoning_family: "qwen3"  # Qwen2.5 uses similar reasoning syntax to Qwen3
-    preferred_endpoints: ["ollama"]
+    reasoning_family: "qwen3"
+    preferred_endpoints: ["xpu-3b"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-3B-Instruct"
+  "qwen2.5:7b":
+    reasoning_family: "qwen3"
+    preferred_endpoints: ["xpu-7b"]
+    external_model_ids:
+      vllm: "Qwen/Qwen2.5-7B-Instruct"
 
 # Categories define domain metadata only (no routing logic)
 categories:
@@ -377,7 +401,7 @@ decisions:
         - type: "domain"
           name: "math"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "qwen2.5:7b"
         use_reasoning: true
     plugins:
       - type: "system_prompt"
@@ -397,7 +421,7 @@ decisions:
         - type: "domain"
           name: "physics"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "qwen2.5:7b"
         use_reasoning: true
     plugins:
       - type: "system_prompt"
@@ -417,7 +441,7 @@ decisions:
         - type: "domain"
           name: "computer_science"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "qwen2.5:7b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -457,7 +481,7 @@ decisions:
         - type: "domain"
           name: "engineering"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "qwen2.5:7b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"

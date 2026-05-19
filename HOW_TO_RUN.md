@@ -67,16 +67,110 @@ export no_proxy=localhost,127.0.0.1
 
 All scripts and Docker commands in this guide inherit these from the environment — nothing is hardcoded.
 
+Set `REPO_ROOT` once and reuse it throughout:
+
+```bash
+export REPO_ROOT=/home/intel/alexeyfa/semantic-router   # adjust to your clone
+cd "$REPO_ROOT"
+```
+
+---
+
+## Quickstart with `scripts/start-all.sh` (recommended)
+
+`scripts/start-all.sh` brings up the full stack — observability, vLLM backend, router, Envoy,
+dashboard — with a preflight check, health-gated startup, and clean shutdown on Ctrl-C.
+
+### One-time setup (do this before the first `start-all.sh` run)
+
+```bash
+cd "$REPO_ROOT"
+
+# 1. Python venv + vllm-sr CLI (used once to bootstrap observability containers)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e src/vllm-sr
+
+# 2. Build the router with the OpenVINO backend
+cd "$REPO_ROOT/src/semantic-router"
+CGO_ENABLED=1 go build -tags=openvino -o "$REPO_ROOT/bin/router-openvino" ./cmd/main.go
+
+# 3. Install func-e (Envoy launcher)
+cd "$REPO_ROOT"
+curl -sSL https://func-e.io/install.sh | bash -s -- -b bin/ v1.3.0
+bin/func-e use 1.35.4
+
+# 4. Build the dashboard (frontend + Go backend)
+cd "$REPO_ROOT/dashboard/frontend" && npm install && npm run build
+cd "$REPO_ROOT/dashboard/backend"  && go build -o dashboard-server ./
+
+# 5. Create the vLLM container (see "Connecting a vLLM Endpoint" below for the full docker run)
+
+# 6. Bootstrap observability containers once (prometheus, grafana, jaeger):
+cd "$REPO_ROOT"
+HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
+# Wait for "vLLM Semantic Router is running!", then Ctrl-C — containers persist for reuse.
+```
+
+### Daily startup with the OpenVINO backend
+
+```bash
+cd "$REPO_ROOT"
+source .venv/bin/activate
+
+AI_BINDING=openvino \
+VLLM_CONTAINER=vllm-xpu \
+HF_TOKEN="${HF_TOKEN}" \
+  scripts/start-all.sh
+```
+
+What the script does, in order:
+
+1. **Preflight** — verifies `bin/router-openvino`, `bin/func-e`, `dashboard/backend/dashboard-server`,
+   `dashboard/frontend/dist`, both configs, Docker access, and the vLLM container. If anything is
+   missing it prints a list with the exact build/install command and exits.
+2. **Observability** — `docker start prometheus grafana jaeger` for existing containers
+   (skipped if already running; WARN if never created).
+3. **vLLM** — `docker start "$VLLM_CONTAINER"` and waits for `:11434/v1/models`.
+4. **Router** — launched via `scripts/entrypoint.sh` in its own process group (so Ctrl-C kills the
+   whole tree). `HF_TOKEN`, `http_proxy`, `https_proxy`, `no_proxy` and OpenVINO library paths are
+   forwarded automatically.
+5. **Envoy** — via `func-e`, waits for `:19000/ready`.
+6. **Dashboard** — Go binary serving the React build.
+7. Prints a status table marking each service `[OK]` / `[FAIL]` / `[skip]`, then waits.
+   Ctrl-C tears down router/Envoy/dashboard cleanly; vLLM and observability containers stay up.
+
+### Env vars accepted by `start-all.sh`
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AI_BINDING` | `openvino` | `openvino` \| `candle` \| `onnx` — selects `bin/router-<binding>` |
+| `VLLM_CONTAINER` | `vllm-xpu` | Docker container name for the vLLM backend |
+| `SKIP_OBSERVABILITY` | `false` | Skip prometheus/grafana/jaeger entirely |
+| `STRICT` | `false` | Abort on the first failed health check instead of WARN-and-continue |
+| `HF_TOKEN` | — | Forwarded to the router for HuggingFace downloads |
+| `http_proxy` / `https_proxy` / `no_proxy` | — | Forwarded to the router |
+
+Logs are written to `/tmp/router.log`, `/tmp/envoy.log`, `/tmp/dashboard.log` (truncated each run).
+On a failed health check the script tails the last 20 lines of the relevant log so you don't have
+to look it up manually.
+
+> **Note for this machine:** the existing vLLM container is named `vllm-server`, not `vllm-xpu`,
+> so use `VLLM_CONTAINER=vllm-server` (or recreate it with `--name vllm-xpu` to match the docs).
+
 ---
 
 ## Quickstart (Verified Working)
+
+> The 5-step manual flow below is preserved for first-time setup and debugging. For day-to-day use,
+> prefer `scripts/start-all.sh` (above).
 
 This is the exact sequence that was used to start the service.
 
 ### Step 1 — Install the CLI (one-time)
 
 ```bash
-cd /home/gta/semantic-router
+cd "$REPO_ROOT"
 python3 -m venv .venv          # if not already present
 source .venv/bin/activate
 pip install -e src/vllm-sr
@@ -129,7 +223,7 @@ providers:
 ### Step 3 — Start the router + observability stack
 
 ```bash
-cd /home/gta/semantic-router
+cd "$REPO_ROOT"
 source .venv/bin/activate
 HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
 ```
@@ -154,7 +248,7 @@ Envoy is not in the Docker image — it runs locally via `func-e`.
 
 **Install func-e (one-time):**
 ```bash
-cd /home/gta/semantic-router
+cd "$REPO_ROOT"
 curl -sSL https://func-e.io/install.sh | bash -s -- -b bin/ v1.3.0
 # Download Envoy 1.35.4 (proxy is inherited from environment if set):
 bin/func-e use 1.35.4
@@ -163,7 +257,7 @@ bin/func-e use 1.35.4
 **Start Envoy:**
 ```bash
 > /tmp/envoy.log
-nohup /home/gta/semantic-router/scripts/start-envoy.sh &
+nohup "$REPO_ROOT/scripts/start-envoy.sh" &
 disown $!
 ```
 
@@ -179,19 +273,22 @@ The dashboard is not in the Docker image — it runs as a local Go+React process
 
 **Build (one-time, ~45s total):**
 ```bash
-cd /home/gta/semantic-router/dashboard/frontend
+cd "$REPO_ROOT/dashboard/frontend"
 npm install && npm run build
 
-cd /home/gta/semantic-router/dashboard/backend
+cd "$REPO_ROOT/dashboard/backend"
 go build -o dashboard-server .
 ```
 
 **Start:**
 ```bash
 > /tmp/dashboard.log
-nohup /home/gta/semantic-router/scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 &
+nohup "$REPO_ROOT/scripts/start-dashboard.sh" >> /tmp/dashboard.log 2>&1 &
 disown $!
 ```
+
+> `start-dashboard.sh` resolves `$REPO_ROOT` from its own location, so it works regardless of
+> where the repo lives.
 
 **Verify:**
 ```bash
@@ -205,24 +302,35 @@ Open **http://localhost:8702** in your browser.
 
 ## Restarting After a Reboot (full sequence)
 
+The fastest path is `scripts/start-all.sh` (see top of this file). It handles process-group
+cleanup, health checks, and proxy/HF_TOKEN passthrough automatically:
+
 ```bash
-cd /home/gta/semantic-router
+cd "$REPO_ROOT"
+source .venv/bin/activate
+AI_BINDING=openvino VLLM_CONTAINER=vllm-xpu HF_TOKEN="${HF_TOKEN}" scripts/start-all.sh
+```
+
+If you need to bring services up by hand (debugging, partial restart):
+
+```bash
+cd "$REPO_ROOT"
 source .venv/bin/activate
 
 # 1. Router (local binary with OpenVINO backend)
-export OPENVINO_TOKENIZERS_LIB="$PWD/.venv/lib/python3.12/site-packages/openvino_tokenizers/lib/libopenvino_tokenizers.so"
-export LD_LIBRARY_PATH="$PWD/candle-binding/target/release:$PWD/openvino-binding/build:$PWD/nlp-binding/target/release:$PWD/ml-binding/target/release:$LD_LIBRARY_PATH"
-nohup ./bin/router --config config/config.yaml > /tmp/router.log 2>&1 &
+#    entrypoint.sh resolves bin/router-openvino, sets LD_LIBRARY_PATH and OPENVINO_TOKENIZERS_LIB.
+nohup env AI_BINDING=openvino HF_TOKEN="${HF_TOKEN}" \
+  scripts/entrypoint.sh > /tmp/router.log 2>&1 &
 disown $!
 
 # 2. vLLM on Arc B570 (if not already running)
 docker start vllm-xpu   # starts existing container; see vLLM section below if missing
 
 # 3. Envoy
-> /tmp/envoy.log && nohup /home/gta/semantic-router/scripts/start-envoy.sh & disown $!
+> /tmp/envoy.log && nohup scripts/start-envoy.sh & disown $!
 
 # 4. Dashboard
-> /tmp/dashboard.log && nohup /home/gta/semantic-router/scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 & disown $!
+> /tmp/dashboard.log && nohup scripts/start-dashboard.sh >> /tmp/dashboard.log 2>&1 & disown $!
 ```
 
 ### Alternative: Router via Docker (without OpenVINO)
@@ -301,7 +409,7 @@ docker run -d \
   --group-add $RENDER_GID \
   --group-add $VIDEO_GID \
   -p 11434:8000 \
-  -v /home/gta/.cache/huggingface:/root/.cache/huggingface \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
   -e HF_TOKEN="${HF_TOKEN}" \
   -e https_proxy="${https_proxy}" \
   -e http_proxy="${http_proxy}" \
@@ -407,7 +515,7 @@ Then restart the semantic router and Envoy:
 source .venv/bin/activate
 HF_TOKEN="${HF_TOKEN}" vllm-sr serve --config config.yaml
 pkill -9 -f 'func-e|envoy'
-> /tmp/envoy.log && nohup /home/gta/semantic-router/scripts/start-envoy.sh & disown $!
+> /tmp/envoy.log && nohup "$REPO_ROOT/scripts/start-envoy.sh" & disown $!
 ```
 
 ### Notes on the Envoy cluster design
@@ -433,10 +541,15 @@ candle (Rust). This provides optimized CPU inference via Intel's OpenVINO toolki
 
 ### Building the Router
 
+The router binary is built per-binding so multiple variants can coexist in `bin/`. For OpenVINO:
+
 ```bash
-cd /home/gta/semantic-router/src/semantic-router
-CGO_ENABLED=1 go build -o /home/gta/semantic-router/bin/router ./cmd/main.go
+cd "$REPO_ROOT/src/semantic-router"
+CGO_ENABLED=1 go build -tags=openvino -o "$REPO_ROOT/bin/router-openvino" ./cmd/main.go
 ```
+
+`scripts/entrypoint.sh` picks the binary based on `AI_BINDING` (`openvino` → `bin/router-openvino`,
+`candle` → `bin/router-candle`, `onnx` → `bin/router-onnx`).
 
 ### Converting Models to OpenVINO IR
 
@@ -518,32 +631,95 @@ embedding_models:
 
 ### Running
 
+The simplest path is via `scripts/entrypoint.sh`, which sets `LD_LIBRARY_PATH` and
+`OPENVINO_TOKENIZERS_LIB` for you:
+
 ```bash
-cd /home/gta/semantic-router
+cd "$REPO_ROOT"
+AI_BINDING=openvino HF_TOKEN="${HF_TOKEN}" scripts/entrypoint.sh
+```
+
+Or run the binary directly with the env vars set by hand:
+
+```bash
+cd "$REPO_ROOT"
 export OPENVINO_TOKENIZERS_LIB="$PWD/.venv/lib/python3.12/site-packages/openvino_tokenizers/lib/libopenvino_tokenizers.so"
-export LD_LIBRARY_PATH="$PWD/candle-binding/target/release:$PWD/openvino-binding/build:$PWD/nlp-binding/target/release:$PWD/ml-binding/target/release:$LD_LIBRARY_PATH"
-./bin/router --config config/config.yaml
+export LD_LIBRARY_PATH="$PWD/candle-binding/target/release:$PWD/openvino-binding/build:$PWD/nlp-binding/target/release:$PWD/ml-binding/target/release:${LD_LIBRARY_PATH:-}"
+./bin/router-openvino --config config/config.yaml
 ```
 
-### Verify
+### Verify the router is actually using OpenVINO
 
+The backend is fixed at **build time** by Go build tags — `use_openvino: true` in `config.yaml`
+is only documentation. If you launched `bin/router-openvino`, classifier/PII/jailbreak/embedding
+inference goes through OpenVINO; if you launched `bin/router-candle`, it goes through Candle/Rust.
+Use the layered checks below to confirm the OV path is live.
+
+**1. Linker says it's against libopenvino:**
 ```bash
-curl --noproxy localhost http://localhost:8080/health
-# → {"status": "healthy", "service": "classification-api"}
-
-curl --noproxy localhost http://localhost:8080/api/v1/classify/intent \
-  -H "Content-Type: application/json" \
-  -d '{"text": "What is machine learning?"}'
-# → {"classification":{"category":"...","confidence":...,"processing_time_ms":3}, ...}
+ldd bin/router-openvino | grep -E 'openvino|tokenizer'
+# Expect three lines: libopenvino_semantic_router.so.0, libopenvino.so.<ver>, libopenvino_tokenizers.so
 ```
+
+**2. Running process has the OV libs mapped in memory:**
+```bash
+PID=$(pgrep -f router-openvino)
+grep -oE '/[^ ]*libopenvino[^ ]*' /proc/$PID/maps | sort -u
+```
+
+**3. Startup log shows the OV initializers ran:**
+```bash
+grep -E 'OpenVINO category classifier|OpenVINO jailbreak|OpenVINO PII|Loaded OpenVINO tokenizers' /tmp/router.log
+# Expect "Initializing OpenVINO ... initialized successfully" for category, jailbreak, PII.
+# A candle build prints "Initializing ModernBERT classifier model (optimized BERT)..." instead.
+```
+
+**4. Live inference returns results in single-digit ms (typical for OV CPU on a small classifier):**
+```bash
+curl -s --noproxy localhost http://localhost:8080/api/v1/classify/intent \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Solve the integral of x^2 dx using the power rule"}'
+# → {"classification":{"category":"math_decision","confidence":1.0,"processing_time_ms":6}, ...}
+```
+
+**One-liner that combines all four:**
+```bash
+ldd bin/router-openvino | grep -q libopenvino && \
+grep -q 'OpenVINO category classifier initialized' /tmp/router.log && \
+curl -s --noproxy localhost http://localhost:8080/api/v1/classify/intent \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"integrate sin(x) dx"}' | grep -q math_decision && \
+echo "OpenVINO backend confirmed"
+```
+
+> The full domain-routing E2E suite (classifier + Envoy two-cluster routing + cache/PII/jailbreak)
+> lives in [scripts/test-routing.sh](scripts/test-routing.sh). Run `scripts/test-routing.sh` to
+> exercise everything.
+
+#### Notes / current limitations
+
+- Device is hardcoded to **CPU** in [classifier_backend_openvino.go](src/semantic-router/pkg/classification/classifier_backend_openvino.go) (`const openvinoDevice = "CPU"`). The
+  `openvino_device:` field in `config.yaml` is not consumed by the code yet.
+- Category classifier always goes through the ModernBERT FFI path. **BERT-base** OV exports
+  fail at runtime (`Eltwise shape infer ... mismatch`); use the ModernBERT variants — e.g.
+  `LLM-Semantic-Router/lora_intent_classifier_modernbert-base_model` and the matching PII
+  ModernBERT model.
+- The classifier returns the category label `"computer science"` (with a space); decisions in
+  `config.yaml` use `computer_science` (with underscore), so CS-flagged prompts currently fall
+  through to `general_decision`.
 
 ---
 
 ## Stopping Everything
 
+If you started the stack with `scripts/start-all.sh`, just **Ctrl-C** the foreground process —
+router, Envoy, and dashboard exit cleanly (vLLM and observability containers stay up by design).
+
+For a full manual teardown:
+
 ```bash
 source .venv/bin/activate
-pkill -f 'bin/router'                 # stops local router (OpenVINO mode)
+pkill -f 'router-openvino\|router-candle\|router-onnx'   # stops local router (any binding)
 vllm-sr stop                          # stops Docker router + observability containers
 docker stop vllm-xpu                  # stops vLLM (keeps container for fast restart)
 pkill -9 -f 'func-e\|envoy'          # stops Envoy

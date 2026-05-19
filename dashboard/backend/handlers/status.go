@@ -217,8 +217,8 @@ func StatusHandler(routerAPIURL, configDir, envoyURL string) http.HandlerFunc {
 					})
 					status.Endpoints = []string{routerAPIURL}
 
-					// Also check Envoy if running locally
-					envoyRunning, envoyHealthy, envoyMsg := checkEnvoyHealth("http://localhost:8801/ready")
+					// Also check Envoy if running locally — admin /ready is on :19000.
+					envoyRunning, envoyHealthy, envoyMsg := checkEnvoyHealth("http://localhost:19000/ready")
 					if envoyRunning {
 						status.Services = append(status.Services, ServiceStatus{
 							Name:      "Envoy",
