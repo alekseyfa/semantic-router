@@ -67,10 +67,11 @@ if [[ -d "$PROJECT_ROOT/openvino-binding/build" ]]; then
   export LD_LIBRARY_PATH="${PROJECT_ROOT}/candle-binding/target/release:${PROJECT_ROOT}/openvino-binding/build:${PROJECT_ROOT}/nlp-binding/target/release:${PROJECT_ROOT}/ml-binding/target/release:${LD_LIBRARY_PATH:-}"
 fi
 
-# Set OpenVINO tokenizers path if not already set
+# Set OpenVINO tokenizers path if not already set.
+# Search the venv for any Python version (3.12, 3.13, ...) instead of hardcoding.
 if [[ "$AI_BINDING" == "openvino" && -z "${OPENVINO_TOKENIZERS_LIB:-}" ]]; then
-  OV_TOK="$PROJECT_ROOT/.venv/lib/python3.12/site-packages/openvino_tokenizers/lib/libopenvino_tokenizers.so"
-  if [[ -f "$OV_TOK" ]]; then
+  OV_TOK=$(find "$PROJECT_ROOT/.venv" -name 'libopenvino_tokenizers.so' 2>/dev/null | head -1)
+  if [[ -n "$OV_TOK" ]]; then
     export OPENVINO_TOKENIZERS_LIB="$OV_TOK"
   fi
 fi
