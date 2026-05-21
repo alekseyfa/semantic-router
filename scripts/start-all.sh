@@ -76,7 +76,7 @@ preflight() {
   else
     for entry in "${VLLM_LIST[@]}"; do
       local name=${entry%%:*}
-      docker inspect "$name" &>/dev/null || missing+=("$name container not created (see CLAUDE.md → 'Running vLLM on Intel Arc' for the docker run command, or set VLLM_CONTAINERS=<list>)")
+      docker inspect "$name" &>/dev/null || missing+=("$name docker container not created")
     done
   fi
 
