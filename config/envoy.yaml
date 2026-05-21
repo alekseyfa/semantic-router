@@ -60,17 +60,17 @@ static_resources:
                   cluster: openai_api_cluster
                   timeout: 300s
                   host_rewrite_literal: "api.openai.com"
-              # 7B route — picked when router sets x-selected-model = qwen2.5:7b (alias)
+              # Qwen route — router sets x-selected-model to the model_config alias ("qwen-7b").
               - match:
                   prefix: "/"
                   headers:
                   - name: x-selected-model
                     string_match:
-                      exact: "qwen2.5:7b"
+                      exact: "qwen-7b"
                 route:
                   cluster: vllm_7b_cluster
                   timeout: 300s
-              # Default route (3B and everything else) using static cluster on :11434
+              # Default route (Llama and everything else) using static cluster on :11434
               - match:
                   prefix: "/"
                 route:

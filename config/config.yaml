@@ -152,26 +152,25 @@ hallucination_mitigation:
 # Supported formats: 127.0.0.1, 192.168.1.1, ::1, 2001:db8::1, example.com, localhost
 # Note: Use the 'port' field for port numbers, not in the address field
 vllm_endpoints:
-  - name: "xpu-3b"
+  - name: "xpu-llama3b"
     address: "127.0.0.1"
     port: 11434
     weight: 1
     type: "vllm"
-  - name: "xpu-7b"
+  - name: "xpu-qwen7b"
     address: "127.0.0.1"
     port: 11435
     weight: 1
     type: "vllm"
 
 model_config:
-  "qwen2.5:3b":
-    reasoning_family: "qwen3"
-    preferred_endpoints: ["xpu-3b"]
+  "llama-3b":
+    preferred_endpoints: ["xpu-llama3b"]
     external_model_ids:
-      vllm: "Qwen/Qwen2.5-3B-Instruct"
-  "qwen2.5:7b":
+      vllm: "meta-llama/Llama-3.2-3B-Instruct"
+  "qwen-7b":
     reasoning_family: "qwen3"
-    preferred_endpoints: ["xpu-7b"]
+    preferred_endpoints: ["xpu-qwen7b"]
     external_model_ids:
       vllm: "Qwen/Qwen2.5-7B-Instruct"
 
@@ -210,9 +209,9 @@ categories:
   - name: physics
     description: "Physics and physical sciences"
     mmlu_categories: ["physics"]
-  - name: computer_science
+  - name: "computer science"
     description: "Computer science and programming"
-    mmlu_categories: ["computer_science"]
+    mmlu_categories: ["computer science"]
   - name: philosophy
     description: "Philosophy and ethical questions"
     mmlu_categories: ["philosophy"]
@@ -233,7 +232,7 @@ decisions:
         - type: "domain"
           name: "business"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -253,7 +252,7 @@ decisions:
         - type: "domain"
           name: "law"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -273,7 +272,7 @@ decisions:
         - type: "domain"
           name: "psychology"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -297,7 +296,7 @@ decisions:
         - type: "domain"
           name: "biology"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -317,7 +316,7 @@ decisions:
         - type: "domain"
           name: "chemistry"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "qwen-7b"
         use_reasoning: true
     plugins:
       - type: "system_prompt"
@@ -337,7 +336,7 @@ decisions:
         - type: "domain"
           name: "history"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -357,7 +356,7 @@ decisions:
         - type: "domain"
           name: "health"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -381,7 +380,7 @@ decisions:
         - type: "domain"
           name: "economics"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -401,7 +400,7 @@ decisions:
         - type: "domain"
           name: "math"
     modelRefs:
-      - model: "qwen2.5:7b"
+      - model: "qwen-7b"
         use_reasoning: true
     plugins:
       - type: "system_prompt"
@@ -421,7 +420,7 @@ decisions:
         - type: "domain"
           name: "physics"
     modelRefs:
-      - model: "qwen2.5:7b"
+      - model: "qwen-7b"
         use_reasoning: true
     plugins:
       - type: "system_prompt"
@@ -439,9 +438,9 @@ decisions:
       operator: "AND"
       conditions:
         - type: "domain"
-          name: "computer_science"
+          name: "computer science"
     modelRefs:
-      - model: "qwen2.5:7b"
+      - model: "qwen-7b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -461,7 +460,7 @@ decisions:
         - type: "domain"
           name: "philosophy"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -481,7 +480,7 @@ decisions:
         - type: "domain"
           name: "engineering"
     modelRefs:
-      - model: "qwen2.5:7b"
+      - model: "qwen-7b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -501,7 +500,7 @@ decisions:
         - type: "domain"
           name: "other"
     modelRefs:
-      - model: "qwen2.5:3b"
+      - model: "llama-3b"
         use_reasoning: false
     plugins:
       - type: "system_prompt"
@@ -523,7 +522,7 @@ decisions:
           auto_store: false
 
 
-default_model: "qwen2.5:3b"
+default_model: "llama-3b"
 
 # Reasoning family configurations
 reasoning_families:

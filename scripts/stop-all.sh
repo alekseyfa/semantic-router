@@ -13,19 +13,26 @@
 # leave the rest of the stack running.
 #
 # Env:
-#   VLLM_CONTAINER   primary vLLM container name (default: vllm-xpu)
-#                    Any other container starting with the same prefix
-#                    (e.g. vllm-xpu-7b) is also stopped.
+#   VLLM_CONTAINERS  space-separated list of container names to stop
+#                    (default: "vllm-llama3b vllm-qwen7b").
+#                    Each name also matches "name-*" siblings (e.g. vllm-xpu-7b).
+#   VLLM_CONTAINER   legacy single-container override (used when VLLM_CONTAINERS unset).
 #   KEEP_VLLM=true   leave vLLM containers running (only kill router/envoy/dashboard).
 #   KEEP_OBS=true    leave observability containers running.
 #
 # Usage:
 #   scripts/stop-all.sh
-#   VLLM_CONTAINER=vllm-server scripts/stop-all.sh
+#   VLLM_CONTAINERS="vllm-server" scripts/stop-all.sh
 #   KEEP_VLLM=true KEEP_OBS=true scripts/stop-all.sh   # stop only local processes
 set -uo pipefail
 
-VLLM_CONTAINER=${VLLM_CONTAINER:-vllm-xpu}
+if [[ -n "${VLLM_CONTAINERS:-}" ]]; then
+  read -ra VLLM_NAMES <<< "$VLLM_CONTAINERS"
+elif [[ -n "${VLLM_CONTAINER:-}" ]]; then
+  VLLM_NAMES=("$VLLM_CONTAINER")
+else
+  VLLM_NAMES=("vllm-llama3b" "vllm-qwen7b")
+fi
 KEEP_VLLM=${KEEP_VLLM:-false}
 KEEP_OBS=${KEEP_OBS:-false}
 
@@ -104,9 +111,15 @@ else
   while IFS= read -r name; do
     [[ -n "$name" ]] && matched+=("$name")
   done < <(docker ps --format '{{.Names}}' 2>/dev/null \
-            | awk -v p="$VLLM_CONTAINER" '$0 == p || index($0, p"-") == 1')
+            | awk -v plist="${VLLM_NAMES[*]}" '
+                BEGIN { n = split(plist, pats, " ") }
+                {
+                  for (i=1; i<=n; i++) {
+                    if ($0 == pats[i] || index($0, pats[i]"-") == 1) { print; next }
+                  }
+                }')
   if (( ${#matched[@]} == 0 )); then
-    log "  no running containers matching '$VLLM_CONTAINER*'"
+    log "  no running containers matching: ${VLLM_NAMES[*]}"
   else
     for c in "${matched[@]}"; do stop_container "$c"; done
   fi

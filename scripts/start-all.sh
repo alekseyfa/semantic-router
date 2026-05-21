@@ -5,7 +5,9 @@
 #   AI_BINDING           openvino (default) | candle | onnx
 #   SKIP_OBSERVABILITY   true to skip Prometheus/Grafana/Jaeger (default: false)
 #   STRICT               true to abort on any health check failure (default: false)
-#   VLLM_CONTAINER       vLLM backend container name (default: vllm-xpu)
+#   VLLM_CONTAINERS      space-separated list of "name:port" pairs
+#                        (default: "vllm-llama3b:11434 vllm-qwen7b:11435")
+#   VLLM_CONTAINER       legacy single-container override; assumes :11434
 #   HF_TOKEN             Hugging Face token, passed through to router
 #   http_proxy/https_proxy/no_proxy  passed through to router
 set -euo pipefail
@@ -17,7 +19,15 @@ cd "$PROJECT_ROOT"
 AI_BINDING=${AI_BINDING:-openvino}
 SKIP_OBSERVABILITY=${SKIP_OBSERVABILITY:-false}
 STRICT=${STRICT:-false}
-VLLM_CONTAINER=${VLLM_CONTAINER:-vllm-xpu}
+
+# Resolve the vLLM container list (each entry is "name:port").
+if [[ -n "${VLLM_CONTAINERS:-}" ]]; then
+  read -ra VLLM_LIST <<< "$VLLM_CONTAINERS"
+elif [[ -n "${VLLM_CONTAINER:-}" ]]; then
+  VLLM_LIST=("$VLLM_CONTAINER:11434")
+else
+  VLLM_LIST=("vllm-llama3b:11434" "vllm-qwen7b:11435")
+fi
 
 log()  { echo "[start-all] $*"; }
 warn() { echo "[start-all] WARN: $*" >&2; }
@@ -64,7 +74,10 @@ preflight() {
   if ! docker info &>/dev/null; then
     missing+=("docker daemon not reachable (run: sudo systemctl start docker, or check user groups)")
   else
-    docker inspect "$VLLM_CONTAINER" &>/dev/null || missing+=("$VLLM_CONTAINER container not created (see CLAUDE.md → 'Running vLLM on Intel Arc' for the docker run command, or set VLLM_CONTAINER=<existing-name>)")
+    for entry in "${VLLM_LIST[@]}"; do
+      local name=${entry%%:*}
+      docker inspect "$name" &>/dev/null || missing+=("$name container not created (see CLAUDE.md → 'Running vLLM on Intel Arc' for the docker run command, or set VLLM_CONTAINERS=<list>)")
+    done
   fi
 
   if (( ${#missing[@]} > 0 )); then
@@ -86,7 +99,9 @@ cleanup() {
     kill -TERM -- "-$ROUTER_PGID" 2>/dev/null || true
   fi
   wait 2>/dev/null || true
-  log "Done. ($VLLM_CONTAINER and observability containers were left running)"
+  local names=()
+  for entry in "${VLLM_LIST[@]}"; do names+=("${entry%%:*}"); done
+  log "Done. (${names[*]} and observability containers were left running)"
 }
 trap cleanup EXIT INT TERM
 
@@ -111,20 +126,24 @@ if [[ "$SKIP_OBSERVABILITY" != "true" ]]; then
   fi
 fi
 
-# --- 2. vLLM backend ---
-if check_port 11434; then
-  log "vLLM already running on :11434"
-else
-  log "Starting $VLLM_CONTAINER container..."
-  docker start "$VLLM_CONTAINER" >/dev/null || fail "Failed to start $VLLM_CONTAINER container"
-  log "Waiting for vLLM to become ready (up to 120s)..."
-  if wait_http "http://localhost:11434/v1/models" 120; then
-    log "vLLM ready"
+# --- 2. vLLM backends ---
+for entry in "${VLLM_LIST[@]}"; do
+  name=${entry%%:*}
+  port=${entry##*:}
+  if check_port "$port"; then
+    log "vLLM $name already running on :$port"
+    continue
+  fi
+  log "Starting $name container..."
+  docker start "$name" >/dev/null || fail "Failed to start $name container"
+  log "Waiting for $name to become ready on :$port (up to 120s)..."
+  if wait_http "http://localhost:$port/v1/models" 120; then
+    log "$name ready on :$port"
   else
-    msg="vLLM not ready after 120s on :11434 (check: docker logs $VLLM_CONTAINER)"
+    msg="$name not ready after 120s on :$port (check: docker logs $name)"
     [[ "$STRICT" == "true" ]] && fail "$msg" || warn "$msg"
   fi
-fi
+done
 
 # --- 3. Router ---
 if check_port 8080; then
@@ -220,7 +239,11 @@ log "=== Stack Status ==="
 status_line "Router           " 8080  "http://localhost:8080/health"
 status_line "gRPC ExtProc     " 50051 ":50051"
 status_line "Envoy proxy      " 8801  "http://localhost:8801/v1/chat/completions"
-status_line "vLLM backend     " 11434 "http://localhost:11434/v1/models"
+for entry in "${VLLM_LIST[@]}"; do
+  vname=${entry%%:*}
+  vport=${entry##*:}
+  status_line "vLLM $vname" "$vport" "http://localhost:$vport/v1/models"
+done
 status_line "Dashboard        " 8702  "http://localhost:8702"
 status_line "Metrics          " 9190  "http://localhost:9190/metrics"
 status_line "Grafana          " 3000  "http://localhost:3000"           false
@@ -228,7 +251,9 @@ status_line "Prometheus       " 9090  "http://localhost:9090"           false
 status_line "Jaeger           " 16686 "http://localhost:16686"          false
 echo ""
 log "Logs: /tmp/router.log, /tmp/envoy.log, /tmp/dashboard.log"
-log "Stop: Ctrl-C ($VLLM_CONTAINER and observability containers will keep running)"
+vllm_names=()
+for entry in "${VLLM_LIST[@]}"; do vllm_names+=("${entry%%:*}"); done
+log "Stop: Ctrl-C (${vllm_names[*]} and observability containers will keep running)"
 echo ""
 
 wait
