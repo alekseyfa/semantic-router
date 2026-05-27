@@ -35,6 +35,12 @@ var (
 
 	tokenClassifierInitOnce sync.Once
 	tokenClassifierInitErr  error
+
+	// Dedicated slot for the jailbreak classifier — kept separate from the
+	// general classifier slot so a router can run category and jailbreak
+	// models concurrently. See ov_init_jailbreak_classifier in C++.
+	jailbreakClassifierInitOnce sync.Once
+	jailbreakClassifierInitErr  error
 )
 
 // ================================================================================================
@@ -666,6 +672,63 @@ func ClassifyTokens(text string, id2labelJson string) (TokenClassificationResult
 
 	return TokenClassificationResult{
 		Entities: entities,
+	}, nil
+}
+
+// ================================================================================================
+// DEDICATED JAILBREAK CLASSIFIER SLOT
+// ================================================================================================
+
+// InitJailbreakClassifier initialises the dedicated jailbreak classifier slot.
+// Use this when the router already has a category/intent classifier loaded via
+// InitModernBertClassifier; sharing the single slot would silently overwrite
+// the first model.
+func InitJailbreakClassifier(modelPath string, numClasses int, device string) error {
+	jailbreakClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			jailbreakClassifierInitErr = fmt.Errorf("model path cannot be empty")
+			return
+		}
+		if numClasses < 2 {
+			jailbreakClassifierInitErr = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
+			return
+		}
+		if device == "" {
+			device = "CPU"
+		}
+		log.Printf("Initializing OpenVINO jailbreak classifier slot: %s on %s with %d classes", modelPath, device, numClasses)
+
+		cModelPath := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelPath))
+		cDevice := C.CString(device)
+		defer C.free(unsafe.Pointer(cDevice))
+
+		if !bool(C.ov_init_jailbreak_classifier(cModelPath, C.int(numClasses), cDevice)) {
+			jailbreakClassifierInitErr = fmt.Errorf("failed to initialize OpenVINO jailbreak classifier")
+		}
+	})
+	return jailbreakClassifierInitErr
+}
+
+// IsJailbreakClassifierInitialized reports whether the dedicated jailbreak slot is loaded.
+func IsJailbreakClassifierInitialized() bool {
+	return bool(C.ov_is_jailbreak_classifier_initialized())
+}
+
+// ClassifyJailbreak runs inference against the dedicated jailbreak classifier slot.
+func ClassifyJailbreak(text string) (ClassResult, error) {
+	if jailbreakClassifierInitErr != nil {
+		return ClassResult{}, fmt.Errorf("jailbreak classifier not initialized: %v", jailbreakClassifierInitErr)
+	}
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+	result := C.ov_classify_jailbreak(cText)
+	if result.predicted_class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify jailbreak text")
+	}
+	return ClassResult{
+		Class:      int(result.predicted_class),
+		Confidence: float32(result.confidence),
 	}, nil
 }
 

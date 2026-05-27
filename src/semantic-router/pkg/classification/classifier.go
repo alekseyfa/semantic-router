@@ -234,8 +234,8 @@ func createJailbreakInference(promptGuardCfg *config.PromptGuardConfig, routerCf
 		// Pass default threshold from PromptGuardConfig
 		return NewVLLMJailbreakInference(externalCfg, promptGuardCfg.Threshold)
 	}
-	// Use Candle-based inference
-	return createJailbreakInferenceCandle(), nil
+	// Use the default in-tree inference (Candle, or OpenVINO when built with -tags=openvino).
+	return createJailbreakInferenceDefault(), nil
 }
 
 type PIIInitializer interface {
@@ -596,6 +596,9 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 	} else {
 		piiInitializer = createPIIInitializer()
 		piiInference = createPIIInference()
+		// Backend-specific hook: lets the OpenVINO backend stash the mapping
+		// so it can pass id2label JSON into the C++ token classifier.
+		setPIIMappingForInference(piiInference, piiMapping)
 	}
 
 	options := []option{

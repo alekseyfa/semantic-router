@@ -356,6 +356,32 @@ OVTokenClassificationResult ov_classify_modernbert_tokens(const char* text, cons
  */
 OVEmbeddingResult ov_get_modernbert_embedding(const char* text, int max_length);
 
+/**
+ * @brief Initialize a second text classifier slot dedicated to jailbreak/security
+ * detection. The router needs at least two simultaneous text classifiers (one
+ * for category/intent, one for jailbreak); both end up under the same
+ * ov_init_classifier slot otherwise, with the second init silently overwriting
+ * the first. This dedicated slot keeps them isolated.
+ *
+ * @param model_path Path to OpenVINO IR model (.xml file)
+ * @param num_classes Number of classification classes
+ * @param device Device name ("CPU", "GPU", "AUTO", etc.)
+ * @return true if initialization succeeded, false otherwise
+ */
+bool ov_init_jailbreak_classifier(const char* model_path, int num_classes, const char* device);
+
+/**
+ * @brief Check if the jailbreak classifier slot is initialized
+ */
+bool ov_is_jailbreak_classifier_initialized();
+
+/**
+ * @brief Classify text using the jailbreak classifier slot
+ * @param text Input text
+ * @return Classification result
+ */
+OVClassificationResult ov_classify_jailbreak(const char* text);
+
 // ================================================================================================
 // LORA ADAPTER SUPPORT (BERT AND MODERNBERT)
 // ================================================================================================

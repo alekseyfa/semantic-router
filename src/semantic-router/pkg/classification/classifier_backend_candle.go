@@ -28,3 +28,9 @@ func createPIIInference() PIIInference {
 func createEmbeddingInitializer() EmbeddingClassifierInitializer {
 	return &ExternalModelBasedEmbeddingInitializer{}
 }
+
+func createJailbreakInferenceDefault() JailbreakInference {
+	return createJailbreakInferenceCandle()
+}
+
+func setPIIMappingForInference(_ PIIInference, _ *PIIMapping) {}

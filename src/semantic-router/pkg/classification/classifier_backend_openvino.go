@@ -29,12 +29,30 @@ func createJailbreakInitializer() JailbreakInitializer {
 	return &openVINOJailbreakInitializer{}
 }
 
+// createJailbreakInferenceDefault returns the OpenVINO jailbreak inference.
+// This overrides the Candle default; the OV initializer above loaded the model
+// into the OpenVINO runtime, so inference must run there too — otherwise we'd
+// silently fall back to Candle (whose model was never initialised).
+func createJailbreakInferenceDefault() JailbreakInference {
+	return &openVINOJailbreakInference{}
+}
+
 func createPIIInitializer() PIIInitializer {
 	return &openVINOPIIInitializer{}
 }
 
 func createPIIInference() PIIInference {
 	return &openVINOPIIInference{}
+}
+
+// setPIIMappingForInference injects the PII id->label mapping into the active
+// OpenVINO PII inference. Without this the C++ token classifier falls back to
+// generic BIO labels (B-PER/I-PER/...) and every request returns mislabelled
+// entity types. Called once at classifier construction.
+func setPIIMappingForInference(inf PIIInference, mapping *PIIMapping) {
+	if ov, ok := inf.(*openVINOPIIInference); ok {
+		ov.id2labelJson = buildPIIId2LabelJson(mapping)
+	}
 }
 
 func createEmbeddingInitializer() EmbeddingClassifierInitializer {
@@ -71,13 +89,19 @@ func (c *openVINOCategoryInference) Classify(text string) (candle_binding.ClassR
 }
 
 func (c *openVINOCategoryInference) ClassifyWithProbabilities(text string) (candle_binding.ClassResultWithProbs, error) {
-	result, err := openvino_binding.ClassifyModernBert(text)
+	// Use OV's softmax-on-logits path so the entropy-based reasoning decision
+	// gets a real probability distribution. The previous implementation called
+	// ClassifyModernBert (no probs) and returned an empty Probabilities slice,
+	// which silently broke entropy reasoning.
+	result, err := openvino_binding.ClassifyTextWithProbabilities(text)
 	if err != nil {
 		return candle_binding.ClassResultWithProbs{}, err
 	}
 	return candle_binding.ClassResultWithProbs{
-		Class:      result.Class,
-		Confidence: result.Confidence,
+		Class:         result.Class,
+		Confidence:    result.Confidence,
+		Probabilities: result.Probabilities,
+		NumClasses:    result.NumClasses,
 	}, nil
 }
 
@@ -89,7 +113,11 @@ func (c *openVINOJailbreakInitializer) Init(modelID string, useCPU bool, numClas
 	modelPath := resolveOVModelPath(modelID)
 	logging.Infof("Initializing OpenVINO jailbreak classifier: %s on %s with %d classes", modelPath, openvinoDevice, numClasses[0])
 
-	err := openvino_binding.InitClassifier(modelPath, numClasses[0], openvinoDevice)
+	// Use the dedicated jailbreak classifier slot in the C++ binding. The
+	// general TextClassifier/ModernBertClassifier slot is already taken by the
+	// category model; sharing it would silently overwrite the category model
+	// because both classifiers are ModernBERTs sharing one global instance.
+	err := openvino_binding.InitJailbreakClassifier(modelPath, numClasses[0], openvinoDevice)
 	if err != nil {
 		return fmt.Errorf("failed to initialize OpenVINO jailbreak classifier: %w", err)
 	}
@@ -100,7 +128,7 @@ func (c *openVINOJailbreakInitializer) Init(modelID string, useCPU bool, numClas
 type openVINOJailbreakInference struct{}
 
 func (c *openVINOJailbreakInference) Classify(text string) (candle_binding.ClassResult, error) {
-	result, err := openvino_binding.ClassifyText(text)
+	result, err := openvino_binding.ClassifyJailbreak(text)
 	if err != nil {
 		return candle_binding.ClassResult{}, err
 	}
@@ -126,10 +154,19 @@ func (c *openVINOPIIInitializer) Init(modelID string, useCPU bool, numClasses in
 	return nil
 }
 
-type openVINOPIIInference struct{}
+type openVINOPIIInference struct {
+	// id2labelJson is set by setPIIMappingForInference at classifier construction.
+	// Empty when no mapping is configured — the C++ side then uses its default
+	// BIO labels, which is fine for tests but wrong for any real PII model.
+	id2labelJson string
+}
 
 func (c *openVINOPIIInference) ClassifyTokens(text string) (candle_binding.TokenClassificationResult, error) {
-	result, err := openvino_binding.ClassifyModernBertTokens(text, "{}")
+	id2label := c.id2labelJson
+	if id2label == "" {
+		id2label = "{}"
+	}
+	result, err := openvino_binding.ClassifyModernBertTokens(text, id2label)
 	if err != nil {
 		return candle_binding.TokenClassificationResult{}, err
 	}
@@ -204,7 +241,8 @@ func init() {
 	logging.Infof("AI_BINDING=openvino: using OpenVINO inference backend")
 }
 
-// buildPIIId2LabelJson is used by the PII inference to pass label mapping to C++.
+// buildPIIId2LabelJson serialises the IdxToLabel mapping into the JSON shape
+// the C++ token classifier expects: {"0":"O","1":"B-PER",...}.
 func buildPIIId2LabelJson(mapping *PIIMapping) string {
 	if mapping == nil || len(mapping.IdxToLabel) == 0 {
 		return "{}"

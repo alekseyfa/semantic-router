@@ -158,12 +158,22 @@ bool TokenClassifier::initialize(
         model_->num_classes = num_classes;
         model_->model_path = model_path;
         
-        // Load and compile model (no special config needed for token classification)
-        model_->compiled_model = manager.loadModel(model_path, device);
+        // Same env-driven thread/stream config as TextClassifier. Without it
+        // the previous code compiled with OV defaults (no thread limit) AND
+        // allocated a fresh InferRequest on every classify call — under
+        // concurrent load this both oversubscribes the CPU and burns
+        // allocator time. See ModelManager::buildEnvConfig.
+        constexpr int kClassifiersSharing = 3;
+        ov::AnyMap config = manager.buildEnvConfig(kClassifiersSharing);
+        model_->compiled_model = manager.loadModel(model_path, device, config);
         if (!model_->compiled_model) {
             return false;
         }
-        
+
+        // Reuse InferRequests across calls instead of creating one per call.
+        size_t pool_size = manager.getDefaultPoolSize();
+        manager.createInferPool(*model_, pool_size);
+
         // Load tokenizer vocabulary
         std::string model_dir = model_path;
         auto last_slash = model_dir.find_last_of("/\\");
@@ -171,9 +181,10 @@ bool TokenClassifier::initialize(
             model_dir = model_dir.substr(0, last_slash);
         }
         tokenizer_.loadVocab(model_dir);
-        
-        std::cout << "OpenVINO token classifier initialized: " << model_path 
-                  << " on " << device << " with " << num_classes << " classes" << std::endl;
+
+        std::cout << "OpenVINO token classifier initialized: " << model_path
+                  << " on " << device << " with " << num_classes
+                  << " classes (pool=" << pool_size << ")" << std::endl;
         
         return true;
         
@@ -234,18 +245,23 @@ core::TokenClassificationResult TokenClassifier::classifyTokens(
         std::memcpy(attention_mask_tensor.data<int64_t>(), attention_mask.data(), 
                     attention_mask.size() * sizeof(int64_t));
         
-        // Create infer request (thread-safe per-request)
-        auto infer_request = model_->compiled_model->create_infer_request();
-        
-        // Set input tensors
-        infer_request.set_input_tensor(0, input_ids_tensor);
-        infer_request.set_input_tensor(1, attention_mask_tensor);
-        
-        // Run inference
-        infer_request.infer();
-        
+        // Reuse a pooled InferRequest. Each slot has its own mutex so only
+        // requests round-robin'd to the same slot serialise; OV's scheduler
+        // handles the actual hardware sharing across the rest of the pool.
+        auto& mgr = core::ModelManager::getInstance();
+        auto* slot = mgr.getInferRequest(*model_);
+        if (!slot) {
+            std::cerr << "Token classifier: no InferRequest available" << std::endl;
+            return result;
+        }
+        std::lock_guard<std::mutex> request_lock(slot->mutex);
+
+        slot->request.set_input_tensor(0, input_ids_tensor);
+        slot->request.set_input_tensor(1, attention_mask_tensor);
+        slot->request.infer();
+
         // Get output tensor (logits shape: [batch, seq_len, num_classes])
-        auto output_tensor = infer_request.get_output_tensor();
+        auto output_tensor = slot->request.get_output_tensor();
         const float* logits = output_tensor.data<const float>();
         
         auto shape = output_tensor.get_shape();

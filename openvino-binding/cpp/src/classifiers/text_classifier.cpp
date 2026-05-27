@@ -24,24 +24,28 @@ bool TextClassifier::initialize(
         model_->num_classes = num_classes;
         model_->model_path = model_path;
         
-        // Configure for better concurrency:
-        // - Use 2 threads per inference to allow parallel execution
-        // - Optimize for throughput
-        ov::AnyMap config;
-        config[ov::inference_num_threads.name()] = 2;
-        config[ov::hint::performance_mode.name()] = ov::hint::PerformanceMode::THROUGHPUT;
-        config[ov::hint::num_requests.name()] = 16;
-        
+        // Pull thread/stream config from env so the bench script's
+        // OV_INFERENCE_NUM_THREADS / OV_NUM_STREAMS knobs actually take effect.
+        // The previous version hardcoded inference_num_threads=2 + num_requests=16,
+        // which capped throughput on big NUMA nodes (96 cores → only 2 used per
+        // inference) and ignored the bench's explicit thread budget.
+        //
+        // The router runs three classifiers concurrently per request (domain,
+        // jailbreak, PII). When the user hasn't pinned threads via env, divide
+        // the host thread count across all three so they don't oversubscribe.
+        constexpr int kClassifiersSharing = 3;
+        ov::AnyMap config = manager.buildEnvConfig(kClassifiersSharing);
+
         // Load and compile model
         model_->compiled_model = manager.loadModel(model_path, device, config);
         if (!model_->compiled_model) {
             return false;
         }
-        
-        std::cout << "✓ Configured for concurrent execution (2 threads per request)" << std::endl;
-        
-        // Create InferRequest pool for concurrent inference
-        manager.createInferPool(*model_, 16);
+
+        // Pool size scales with OV_NUM_STREAMS. One slot per stream + headroom.
+        size_t pool_size = manager.getDefaultPoolSize();
+        manager.createInferPool(*model_, pool_size);
+        std::cout << "✓ TextClassifier compiled with env-driven thread/stream config (pool=" << pool_size << ")" << std::endl;
         
         // Load tokenizer vocabulary
         std::string model_dir = model_path;

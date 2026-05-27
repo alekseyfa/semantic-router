@@ -26,6 +26,10 @@ using namespace openvino_sr;
 // ================================================================================================
 
 static std::unique_ptr<classifiers::TextClassifier> g_text_classifier;
+// Second TextClassifier slot dedicated to jailbreak/security models so the
+// category and jailbreak classifiers can coexist. Without this slot the second
+// init call would overwrite the first.
+static std::unique_ptr<classifiers::TextClassifier> g_jailbreak_classifier;
 static std::unique_ptr<classifiers::TokenClassifier> g_token_classifier;
 static std::unique_ptr<embeddings::EmbeddingGenerator> g_embedding_generator;
 static std::unique_ptr<embeddings::EmbeddingGenerator> g_similarity_generator;
@@ -505,6 +509,50 @@ OVEmbeddingResult ov_get_modernbert_embedding(const char* text, int max_length) 
 
 OVClassificationResultWithProbs ov_classify_modernbert_text_with_probabilities(const char* text) {
     return ov_classify_text_with_probabilities(text);
+}
+
+// ================================================================================================
+// DEDICATED JAILBREAK CLASSIFIER SLOT
+// ================================================================================================
+// The router keeps two text classifiers loaded simultaneously (category and
+// jailbreak). They share the same ModernBERT architecture but have different
+// weights and class counts, so they need separate model instances. Routing
+// jailbreak through its own slot avoids the silent overwrite that happens when
+// both classifiers go through ov_init_classifier (single g_text_classifier).
+
+bool ov_init_jailbreak_classifier(const char* model_path, int num_classes, const char* device) {
+    try {
+        if (!g_jailbreak_classifier) {
+            g_jailbreak_classifier = std::make_unique<classifiers::TextClassifier>();
+        }
+        return g_jailbreak_classifier->initialize(model_path, num_classes, device);
+    } catch (const std::exception& e) {
+        std::cerr << "Error initializing jailbreak classifier: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool ov_is_jailbreak_classifier_initialized() {
+    return g_jailbreak_classifier != nullptr && g_jailbreak_classifier->isInitialized();
+}
+
+OVClassificationResult ov_classify_jailbreak(const char* text) {
+    OVClassificationResult result;
+    result.predicted_class = -1;
+    result.confidence = 0.0f;
+    if (!g_jailbreak_classifier || !g_jailbreak_classifier->isInitialized()) {
+        std::cerr << "Jailbreak classifier not initialized" << std::endl;
+        return result;
+    }
+    if (!text) return result;
+    try {
+        auto cpp_result = g_jailbreak_classifier->classify(std::string(text));
+        result.predicted_class = cpp_result.predicted_class;
+        result.confidence = cpp_result.confidence;
+    } catch (const std::exception& e) {
+        std::cerr << "Jailbreak classification error: " << e.what() << std::endl;
+    }
+    return result;
 }
 
 // ================================================================================================
