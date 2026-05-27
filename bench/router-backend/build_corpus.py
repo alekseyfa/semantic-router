@@ -4,15 +4,19 @@ Build a unique-prompt corpus for the router-backend bench.
 Output: corpus.jsonl with one prompt per line:
   {"prompt": str, "category": str, "kind": "neutral"|"pii"|"jailbreak", "source": str}
 
-Composition (default 500 prompts):
+Composition (default 5000 prompts):
   - 70% MMLU questions across all 14 router categories
   - 15% PII-bearing prompts (ai4privacy/pii-masking-200k)
   - 15% jailbreak attempts (JailbreakBench/JBB-Behaviors)
 
 Each prompt appears exactly once -> semantic-cache hit rate ~ 0.
 
+The bench cycles through this corpus (run_bench.py), so the corpus only needs
+to be large enough that within one phase, repeats are rare relative to the
+cache TTL. 5000 unique prompts is comfortable for a single-phase 5-10k run.
+
 Usage:
-  python build_corpus.py --out corpus.jsonl --total 500 --seed 42
+  python build_corpus.py --out corpus.jsonl --total 5000 --seed 42
 """
 import argparse
 import json
@@ -149,7 +153,7 @@ def fetch_jailbreak(n: int, rng: random.Random) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="corpus.jsonl")
-    ap.add_argument("--total", type=int, default=500)
+    ap.add_argument("--total", type=int, default=5000)
     ap.add_argument("--mmlu-frac", type=float, default=0.70)
     ap.add_argument("--pii-frac", type=float, default=0.15)
     ap.add_argument("--jb-frac", type=float, default=0.15)
