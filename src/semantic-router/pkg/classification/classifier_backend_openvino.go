@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
 	openvino_binding "github.com/vllm-project/semantic-router/openvino-binding"
@@ -15,7 +16,20 @@ import (
 // OpenVINO backend factory functions.
 // These replace the candle defaults when building with: go build -tags=openvino
 
-const openvinoDevice = "CPU"
+// defaultOpenvinoDevice is used when a classifier's OpenVINODevice config field
+// is empty. The router previously hardcoded "CPU" for all classifiers; the
+// device is now configurable per classifier (category / jailbreak / PII /
+// embedding) via openvino_device in the YAML config — see
+// config.CategoryModel.OpenVINODevice et al.
+const defaultOpenvinoDevice = "CPU"
+
+func resolveDevice(device string) string {
+	d := strings.TrimSpace(device)
+	if d == "" {
+		return defaultOpenvinoDevice
+	}
+	return d
+}
 
 func createCategoryInitializer() CategoryInitializer {
 	return &openVINOCategoryInitializer{}
@@ -59,19 +73,46 @@ func createEmbeddingInitializer() EmbeddingClassifierInitializer {
 	return &openVINOEmbeddingInitializer{}
 }
 
+// setOpenVINODeviceOnInitializer is the cross-backend hook the classifier
+// construction path calls to forward the per-classifier OpenVINO device from
+// config without changing the shared Init(modelID, useCPU, ...) interface.
+//
+// The Candle backend supplies a no-op stub of this function (see
+// classifier_backend_candle.go) so the call site stays backend-agnostic.
+//
+// Accepted types: *openVINOCategoryInitializer, *openVINOJailbreakInitializer,
+// *openVINOPIIInitializer, *openVINOEmbeddingInitializer. Any other value is
+// ignored.
+func setOpenVINODeviceOnInitializer(initializer interface{}, device string) {
+	d := resolveDevice(device)
+	switch v := initializer.(type) {
+	case *openVINOCategoryInitializer:
+		v.device = d
+	case *openVINOJailbreakInitializer:
+		v.device = d
+	case *openVINOPIIInitializer:
+		v.device = d
+	case *openVINOEmbeddingInitializer:
+		v.device = d
+	}
+}
+
 // --- Category ---
 
-type openVINOCategoryInitializer struct{}
+type openVINOCategoryInitializer struct {
+	device string // resolved OpenVINO device; populated via setOpenVINODeviceOnInitializer
+}
 
 func (c *openVINOCategoryInitializer) Init(modelID string, useCPU bool, numClasses ...int) error {
 	modelPath := resolveOVModelPath(modelID)
-	logging.Infof("Initializing OpenVINO category classifier: %s on %s with %d classes", modelPath, openvinoDevice, numClasses[0])
+	device := resolveDevice(c.device)
+	logging.Infof("Initializing OpenVINO category classifier: %s on %s with %d classes", modelPath, device, numClasses[0])
 
-	err := openvino_binding.InitModernBertClassifier(modelPath, numClasses[0], openvinoDevice)
+	err := openvino_binding.InitModernBertClassifier(modelPath, numClasses[0], device)
 	if err != nil {
-		return fmt.Errorf("failed to initialize OpenVINO category classifier: %w", err)
+		return fmt.Errorf("failed to initialize OpenVINO category classifier on %s: %w", device, err)
 	}
-	logging.Infof("OpenVINO category classifier initialized successfully")
+	logging.Infof("OpenVINO category classifier initialized successfully on %s", device)
 	return nil
 }
 
@@ -107,21 +148,24 @@ func (c *openVINOCategoryInference) ClassifyWithProbabilities(text string) (cand
 
 // --- Jailbreak ---
 
-type openVINOJailbreakInitializer struct{}
+type openVINOJailbreakInitializer struct {
+	device string // resolved OpenVINO device; populated via setOpenVINODeviceOnInitializer
+}
 
 func (c *openVINOJailbreakInitializer) Init(modelID string, useCPU bool, numClasses ...int) error {
 	modelPath := resolveOVModelPath(modelID)
-	logging.Infof("Initializing OpenVINO jailbreak classifier: %s on %s with %d classes", modelPath, openvinoDevice, numClasses[0])
+	device := resolveDevice(c.device)
+	logging.Infof("Initializing OpenVINO jailbreak classifier: %s on %s with %d classes", modelPath, device, numClasses[0])
 
 	// Use the dedicated jailbreak classifier slot in the C++ binding. The
 	// general TextClassifier/ModernBertClassifier slot is already taken by the
 	// category model; sharing it would silently overwrite the category model
 	// because both classifiers are ModernBERTs sharing one global instance.
-	err := openvino_binding.InitJailbreakClassifier(modelPath, numClasses[0], openvinoDevice)
+	err := openvino_binding.InitJailbreakClassifier(modelPath, numClasses[0], device)
 	if err != nil {
-		return fmt.Errorf("failed to initialize OpenVINO jailbreak classifier: %w", err)
+		return fmt.Errorf("failed to initialize OpenVINO jailbreak classifier on %s: %w", device, err)
 	}
-	logging.Infof("OpenVINO jailbreak classifier initialized successfully")
+	logging.Infof("OpenVINO jailbreak classifier initialized successfully on %s", device)
 	return nil
 }
 
@@ -140,17 +184,20 @@ func (c *openVINOJailbreakInference) Classify(text string) (candle_binding.Class
 
 // --- PII ---
 
-type openVINOPIIInitializer struct{}
+type openVINOPIIInitializer struct {
+	device string // resolved OpenVINO device; populated via setOpenVINODeviceOnInitializer
+}
 
 func (c *openVINOPIIInitializer) Init(modelID string, useCPU bool, numClasses int) error {
 	modelPath := resolveOVModelPath(modelID)
-	logging.Infof("Initializing OpenVINO PII token classifier: %s on %s with %d classes", modelPath, openvinoDevice, numClasses)
+	device := resolveDevice(c.device)
+	logging.Infof("Initializing OpenVINO PII token classifier: %s on %s with %d classes", modelPath, device, numClasses)
 
-	err := openvino_binding.InitModernBertTokenClassifier(modelPath, numClasses, openvinoDevice)
+	err := openvino_binding.InitModernBertTokenClassifier(modelPath, numClasses, device)
 	if err != nil {
-		return fmt.Errorf("failed to initialize OpenVINO PII token classifier: %w", err)
+		return fmt.Errorf("failed to initialize OpenVINO PII token classifier on %s: %w", device, err)
 	}
-	logging.Infof("OpenVINO PII token classifier initialized successfully")
+	logging.Infof("OpenVINO PII token classifier initialized successfully on %s", device)
 	return nil
 }
 
@@ -186,7 +233,9 @@ func (c *openVINOPIIInference) ClassifyTokens(text string) (candle_binding.Token
 
 // --- Embedding ---
 
-type openVINOEmbeddingInitializer struct{}
+type openVINOEmbeddingInitializer struct {
+	device string // resolved OpenVINO device; populated via setOpenVINODeviceOnInitializer
+}
 
 func (c *openVINOEmbeddingInitializer) Init(qwen3ModelPath string, gemmaModelPath string, mmBertModelPath string, useCPU bool) error {
 	var modelPath string
@@ -198,15 +247,16 @@ func (c *openVINOEmbeddingInitializer) Init(qwen3ModelPath string, gemmaModelPat
 		return fmt.Errorf("no model path specified for OpenVINO embedding model")
 	}
 
-	logging.Infof("Initializing OpenVINO embedding model: %s on %s", modelPath, openvinoDevice)
+	device := resolveDevice(c.device)
+	logging.Infof("Initializing OpenVINO embedding model: %s on %s", modelPath, device)
 
-	err := openvino_binding.InitEmbeddingModel(modelPath, openvinoDevice)
+	err := openvino_binding.InitEmbeddingModel(modelPath, device)
 	if err != nil {
-		return fmt.Errorf("failed to initialize OpenVINO embedding model: %w", err)
+		return fmt.Errorf("failed to initialize OpenVINO embedding model on %s: %w", device, err)
 	}
 
 	getEmbeddingWithModelType = ovGetEmbedding
-	logging.Infof("OpenVINO embedding model initialized successfully")
+	logging.Infof("OpenVINO embedding model initialized successfully on %s", device)
 	return nil
 }
 

@@ -34,7 +34,7 @@ bool TextClassifier::initialize(
         // jailbreak, PII). When the user hasn't pinned threads via env, divide
         // the host thread count across all three so they don't oversubscribe.
         constexpr int kClassifiersSharing = 3;
-        ov::AnyMap config = manager.buildEnvConfig(kClassifiersSharing);
+        ov::AnyMap config = manager.buildEnvConfig(device, kClassifiersSharing);
 
         // Load and compile model
         model_->compiled_model = manager.loadModel(model_path, device, config);
@@ -42,10 +42,12 @@ bool TextClassifier::initialize(
             return false;
         }
 
-        // Pool size scales with OV_NUM_STREAMS. One slot per stream + headroom.
-        size_t pool_size = manager.getDefaultPoolSize();
+        // Pool size: GPU asks the plugin (OPTIMAL_NUMBER_OF_INFER_REQUESTS),
+        // CPU keeps the streams+headroom heuristic. OV_POOL_SIZE forces both.
+        size_t pool_size = manager.getDefaultPoolSize(device, *model_->compiled_model);
         manager.createInferPool(*model_, pool_size);
-        std::cout << "✓ TextClassifier compiled with env-driven thread/stream config (pool=" << pool_size << ")" << std::endl;
+        std::cout << "✓ TextClassifier compiled (device=" << device
+                  << " pool=" << pool_size << ")" << std::endl;
         
         // Load tokenizer vocabulary
         std::string model_dir = model_path;

@@ -34,3 +34,8 @@ func createJailbreakInferenceDefault() JailbreakInference {
 }
 
 func setPIIMappingForInference(_ PIIInference, _ *PIIMapping) {}
+
+// setOpenVINODeviceOnInitializer is a no-op for the Candle/ONNX backends; the
+// OpenVINO build (-tags=openvino) supplies a real implementation that pins the
+// device for the matching initializer type.
+func setOpenVINODeviceOnInitializer(_ interface{}, _ string) {}

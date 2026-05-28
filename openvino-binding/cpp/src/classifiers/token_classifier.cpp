@@ -164,14 +164,14 @@ bool TokenClassifier::initialize(
         // concurrent load this both oversubscribes the CPU and burns
         // allocator time. See ModelManager::buildEnvConfig.
         constexpr int kClassifiersSharing = 3;
-        ov::AnyMap config = manager.buildEnvConfig(kClassifiersSharing);
+        ov::AnyMap config = manager.buildEnvConfig(device, kClassifiersSharing);
         model_->compiled_model = manager.loadModel(model_path, device, config);
         if (!model_->compiled_model) {
             return false;
         }
 
         // Reuse InferRequests across calls instead of creating one per call.
-        size_t pool_size = manager.getDefaultPoolSize();
+        size_t pool_size = manager.getDefaultPoolSize(device, *model_->compiled_model);
         manager.createInferPool(*model_, pool_size);
 
         // Load tokenizer vocabulary

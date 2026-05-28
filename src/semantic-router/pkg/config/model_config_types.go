@@ -22,6 +22,10 @@ type CategoryModel struct {
 	UseMmBERT32K        bool    `yaml:"use_mmbert_32k"`
 	CategoryMappingPath string  `yaml:"category_mapping_path"`
 	FallbackCategory    string  `yaml:"fallback_category,omitempty"`
+	// OpenVINODevice pins the OpenVINO target device for this classifier
+	// (e.g. "CPU", "GPU", "GPU.0", "GPU.1"). Empty defaults to "CPU".
+	// Only consulted when the router is built with -tags=openvino.
+	OpenVINODevice string `yaml:"openvino_device,omitempty"`
 }
 
 type PIIModel struct {
@@ -30,6 +34,10 @@ type PIIModel struct {
 	UseCPU         bool    `yaml:"use_cpu"`
 	UseMmBERT32K   bool    `yaml:"use_mmbert_32k"`
 	PIIMappingPath string  `yaml:"pii_mapping_path"`
+	// OpenVINODevice pins the OpenVINO target device for this classifier
+	// (e.g. "CPU", "GPU", "GPU.0", "GPU.1"). Empty defaults to "CPU".
+	// Only consulted when the router is built with -tags=openvino.
+	OpenVINODevice string `yaml:"openvino_device,omitempty"`
 }
 
 type EmbeddingModels struct {
@@ -40,6 +48,10 @@ type EmbeddingModels struct {
 	BertModelPath       string     `yaml:"bert_model_path"`
 	UseCPU              bool       `yaml:"use_cpu"`
 	HNSWConfig          HNSWConfig `yaml:"hnsw_config,omitempty"`
+	// OpenVINODevice pins the OpenVINO target device for embedding inference
+	// (e.g. "CPU", "GPU", "GPU.0", "GPU.1"). Empty defaults to "CPU".
+	// Only consulted when the router is built with -tags=openvino.
+	OpenVINODevice string `yaml:"openvino_device,omitempty"`
 }
 
 // HNSWConfig contains settings for optimizing the embedding classifier.
@@ -115,6 +127,10 @@ type PromptGuardConfig struct {
 	UseMmBERT32K         bool    `yaml:"use_mmbert_32k"`
 	JailbreakMappingPath string  `yaml:"jailbreak_mapping_path"`
 	UseVLLM              bool    `yaml:"use_vllm,omitempty"`
+	// OpenVINODevice pins the OpenVINO target device for the jailbreak
+	// classifier (e.g. "CPU", "GPU", "GPU.0", "GPU.1"). Empty defaults to "CPU".
+	// Only consulted when the router is built with -tags=openvino.
+	OpenVINODevice string `yaml:"openvino_device,omitempty"`
 }
 
 type FeedbackDetectorConfig struct {

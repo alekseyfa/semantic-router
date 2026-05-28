@@ -22,7 +22,15 @@ public:
     // Get the OpenVINO Core instance
     ov::Core& getCore();
     
-    // Load a model from file
+    // Load a model from file.
+    //
+    // The device string is passed through to OpenVINO unchanged; with a plain
+    // "CPU" / "GPU" / "GPU.0" / "GPU.1" the OV runtime won't fall back to a
+    // different device (it would throw at compile_model). loadModel
+    // additionally rejects "AUTO" / "HETERO" / "MULTI" prefixes outright and,
+    // after compile, queries EXECUTION_DEVICES to verify the model really
+    // landed on the requested device — protecting against silent fallback if
+    // a future OV release changes its default behavior.
     std::shared_ptr<ov::CompiledModel> loadModel(
         const std::string& model_path,
         const std::string& device = "CPU",
@@ -38,28 +46,40 @@ public:
     // Get an InferRequest from the pool
     InferRequestSlot* getInferRequest(ModelInstance& model);
 
-    // Build an OpenVINO compile-time config from environment variables.
+    // Build an OpenVINO compile-time config tailored to `device`.
     //
-    // Reads:
-    //   OV_INFERENCE_NUM_THREADS — overrides the per-stream thread count
-    //                              (else OV picks a default based on the host).
-    //   OV_NUM_STREAMS           — number of inference streams (== concurrent
-    //                              requests OV optimises for). When set to 1
-    //                              we use the LATENCY hint; otherwise THROUGHPUT.
+    // Two intents drive the output:
+    //   1. Latency hint (OV_NUM_STREAMS=1) — minimise per-request time.
+    //   2. Throughput hint (default, or OV_NUM_STREAMS>1) — maximise QPS.
     //
-    // The bench's run_router.sh sets these per MODE (latency vs throughput).
-    // Without this helper the binding hardcoded `inference_num_threads = 2`
-    // and `THROUGHPUT` regardless of how many cores were available, capping
-    // throughput far below what the NUMA node can deliver.
+    // Per-device behavior:
+    //   CPU: honors OV_INFERENCE_NUM_THREADS and OV_NUM_STREAMS as before.
+    //        With no env, uses hw_threads/num_classifiers_sharing per slot
+    //        so three classifiers don't oversubscribe a NUMA node.
+    //   GPU/NPU: only sets the performance hint. Stream count is chosen by
+    //        OV's plugin (OPTIMAL_NUMBER_OF_INFER_REQUESTS), which is the
+    //        right answer on Battlemage/Arc — manual stream pinning derived
+    //        from CPU core count just oversubscribes Xe queues. A user can
+    //        still force OV_NUM_STREAMS, in which case we honor it.
     //
-    // num_classifiers_sharing: number of classifier slots that will share the
-    //   same CPU budget (currently 3: domain, jailbreak, PII). When the user
-    //   doesn't pin OV_INFERENCE_NUM_THREADS we divide the auto-detected
-    //   thread count across slots so they don't oversubscribe each other.
-    ov::AnyMap buildEnvConfig(int num_classifiers_sharing = 1);
+    // num_classifiers_sharing: how many classifier slots will share this
+    //   device's compute budget (currently 3: domain, jailbreak, PII). Only
+    //   used for the CPU thread split; GPU plugins schedule their own.
+    ov::AnyMap buildEnvConfig(const std::string& device,
+                              int num_classifiers_sharing = 1);
 
-    // Pool size derived from env (OV_NUM_STREAMS) or a sensible default.
-    size_t getDefaultPoolSize();
+    // Pool of InferRequests sized for the target device.
+    //
+    // GPU: queries OPTIMAL_NUMBER_OF_INFER_REQUESTS on the compiled model
+    //   (this is what OV's GPU plugin tells us is the right concurrency for
+    //   the hardware) and adds a small headroom factor. Falls back to a
+    //   conservative 8 if the property is unavailable.
+    // CPU: keeps the pre-existing OV_NUM_STREAMS+4 / hw_threads heuristic.
+    //
+    // Caller may force OV_POOL_SIZE to override either branch, e.g. to
+    // bound VRAM use during sweeps.
+    size_t getDefaultPoolSize(const std::string& device,
+                              const ov::CompiledModel& compiled_model);
 
 private:
     ModelManager() = default;

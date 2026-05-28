@@ -583,6 +583,10 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 			jailbreakInitializer = createMmBERT32KJailbreakInitializer()
 		} else {
 			jailbreakInitializer = createJailbreakInitializer()
+			// No-op on non-OpenVINO backends. On OpenVINO, this pins the
+			// jailbreak model to the device named in
+			// prompt_guard.openvino_device (default CPU).
+			setOpenVINODeviceOnInitializer(jailbreakInitializer, cfg.PromptGuard.OpenVINODevice)
 		}
 	}
 
@@ -596,9 +600,11 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 	} else {
 		piiInitializer = createPIIInitializer()
 		piiInference = createPIIInference()
-		// Backend-specific hook: lets the OpenVINO backend stash the mapping
-		// so it can pass id2label JSON into the C++ token classifier.
+		// Backend-specific hooks. The first lets the OpenVINO backend stash the
+		// mapping so it can pass id2label JSON into the C++ token classifier;
+		// the second pins the OV device per classifier::PIIModel.openvino_device.
 		setPIIMappingForInference(piiInference, piiMapping)
+		setOpenVINODeviceOnInitializer(piiInitializer, cfg.PIIModel.OpenVINODevice)
 	}
 
 	options := []option{
@@ -647,7 +653,11 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 			logging.Errorf("Failed to create keyword embedding classifier: %v", err)
 			return nil, err
 		}
-		options = append(options, withKeywordEmbeddingClassifier(createEmbeddingInitializer(), keywordEmbeddingClassifier))
+		embeddingInitializer := createEmbeddingInitializer()
+		// No-op on non-OpenVINO backends. On OpenVINO, this pins the embedding
+		// model to embedding_models.openvino_device (default CPU).
+		setOpenVINODeviceOnInitializer(embeddingInitializer, cfg.EmbeddingModels.OpenVINODevice)
+		options = append(options, withKeywordEmbeddingClassifier(embeddingInitializer, keywordEmbeddingClassifier))
 	}
 
 	// Add context classifier if configured
@@ -734,6 +744,10 @@ func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, p
 			categoryInference = createMmBERT32KCategoryInference()
 		} else {
 			categoryInitializer = createCategoryInitializer()
+			// No-op on non-OpenVINO backends. On OpenVINO, this pins the
+			// category model to classifier.category_model.openvino_device
+			// (default CPU).
+			setOpenVINODeviceOnInitializer(categoryInitializer, cfg.CategoryModel.OpenVINODevice)
 			categoryInference = createCategoryInference()
 		}
 		options = append(options, withCategory(categoryMapping, categoryInitializer, categoryInference))
